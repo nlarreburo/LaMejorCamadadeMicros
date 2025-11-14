@@ -25,7 +25,7 @@
 /*******************************************************
  *                Constants
  *******************************************************/
-#define RX_SIZE          (1500)
+#define RX_SIZE          (1460)
 #define TX_SIZE          (1460)
 
 /*******************************************************
@@ -128,16 +128,16 @@ void esp_mesh_p2p_tx_main(void *arg)
     int send_count = 0;
     mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
     int route_table_size = 0;
-    mesh_data_t data;
-    data.data = tx_buf;
-    data.size = sizeof(tx_buf);
-    data.proto = MESH_PROTO_BIN;
-    data.tos = MESH_TOS_P2P;
     is_running = true;
 
     while (is_running) {
         if (esp_mesh_is_root()) {
             vTaskDelay(pdMS_TO_TICKS(5000));
+
+            mesh_data_t data;
+            data.proto = MESH_PROTO_BIN;
+            data.tos = MESH_TOS_P2P;
+
             static bool set_led_on = false;
             char cmd_json[150];
             snprintf(cmd_json, sizeof(cmd_json),
@@ -152,6 +152,7 @@ void esp_mesh_p2p_tx_main(void *arg)
 
             ESP_LOGI(MESH_TAG, "RAIZ: Enviando comando a %d nodos: %s", route_table_size, cmd_json);
             for (int i = 0; i < route_table_size; i++) {
+                ESP_LOGE("TABLAS:", "Chequeame la tabla" MACSTR, MAC2STR(route_table[i].addr));
                 err = esp_mesh_send(&route_table[i], &data, MESH_DATA_P2P, NULL, 0);
                 if (err != ESP_OK) {
                      ESP_LOGE(MESH_TAG, "Error al enviar comando al nodo " MACSTR, MAC2STR(route_table[i].addr));
@@ -160,6 +161,9 @@ void esp_mesh_p2p_tx_main(void *arg)
         } else {
             vTaskDelay(pdMS_TO_TICKS(5000));
             if (is_mesh_connected) {
+                mesh_data_t sensor_data;
+                sensor_data.proto = MESH_PROTO_BIN;
+                sensor_data.tos = MESH_TOS_P2P;
                 //aca funcion para leer datos
                 float volt = 10;
                 uint8_t my_mac[6];
@@ -168,12 +172,11 @@ void esp_mesh_p2p_tx_main(void *arg)
                 snprintf(data_json, sizeof(data_json),
                          "{\"mac\":\""MACSTR"\", \"voltaje\":%.2f}",
                          MAC2STR(my_mac), volt);
-                data.data = (uint8_t *)data_json;
-                data.size = strlen(data_json);
+                sensor_data.data = (uint8_t *)data_json;
+                sensor_data.size = strlen(data_json);
                 mesh_addr_t parent_address;
                 if (esp_mesh_get_parent_bssid(&parent_address) == ESP_OK) {
-                    ESP_LOGI(MESH_TAG, "HIJO: Enviando dato de consumo: %s", data_json);
-                    err = esp_mesh_send(&parent_address, &data, MESH_DATA_P2P, NULL, 0);
+                    err = esp_mesh_send(&parent_address, &sensor_data, MESH_DATA_P2P, NULL, 0);
                     if (err != ESP_OK) {
                         ESP_LOGE(MESH_TAG, "Error al enviar dato de consumo: %s", esp_err_to_name(err));
                     }
@@ -193,35 +196,41 @@ void esp_mesh_p2p_rx_main(void *arg)
     mesh_data_t data;
     int flag = 0;
     data.data = rx_buf;
-    data.size = RX_SIZE;
+
     is_running = true;
 
     while (is_running) 
     {
+        data.size = RX_SIZE;
+        //vTaskDelay(pdMS_TO_TICKS(5000));
         err = esp_mesh_recv(&from, &data, portMAX_DELAY, &flag, NULL, 0);
-        if (err == ESP_OK && !esp_mesh_is_root()) {
-            ESP_LOGI(MESH_TAG, "<MESH_EVENT_RECV_SUCCESS>");
-        } else {
-            ESP_LOGI(MESH_TAG, "<MESH_EVENT_RECV_FAIL>");
-            continue;
-        }
+        if (err == ESP_OK && data.size > 0) {
+            // Si llegamos aquí, hemos recibido datos nuevos y válidos.
+            
+            ESP_LOGI(MESH_TAG, "RECV OK from " MACSTR ", size: %d", MAC2STR(from.addr), data.size);
 
-        char *json_str = (char *)data.data;
-        json_str[data.size] = '\0';
-
-        if (strstr(json_str, "\"cmd\"")) {
-            ESP_LOGI(MESH_TAG, "seccion comando - MAC:" MACSTR ": %s", MAC2STR(from.addr), json_str);
-            if (strstr(json_str, "\"on\":1")) {
-                gpio_set_level(2, 1); //encender
-
-            } else if (strstr(json_str, "\"on\":0")) {
-                gpio_set_level(2, 0); //apagar
+            // Añadir terminador nulo por seguridad para poder usar strstr
+            char *json_str = (char *)data.data;
+            if (data.size < RX_SIZE) {
+                json_str[data.size] = '\0';
             }
-        }
 
-        else if (strstr(json_str, "\"voltaje\"") && esp_mesh_is_root()) {
-            ESP_LOGI(MESH_TAG, "seccion consumo - MAC:" MACSTR ": %s", MAC2STR(from.addr), json_str);
-
+            // Comprobar si es un comando de luz
+            if (strstr(json_str, "\"cmd\"")) {
+                ESP_LOGI(MESH_TAG, "  -> Comando: %s", json_str);
+                if (strstr(json_str, "\"on\":1")) {
+                    gpio_set_level(2, 1); // Encender
+                } else if (strstr(json_str, "\"on\":0")) {
+                    gpio_set_level(2, 0); // Apagar
+                }
+            }
+            // Comprobar si es un dato de voltaje y si somos el raíz
+            else if (strstr(json_str, "\"voltaje\"") && esp_mesh_is_root()) {
+                ESP_LOGI(MESH_TAG, "  -> Dato de Voltaje: %s", json_str);
+            }
+        } else if (err != ESP_ERR_MESH_TIMEOUT) {
+            // Solo registrar errores que no sean un simple timeout
+            ESP_LOGE(MESH_TAG, "Error al recibir: %s", esp_err_to_name(err));
         }
     }
     vTaskDelete(NULL);
