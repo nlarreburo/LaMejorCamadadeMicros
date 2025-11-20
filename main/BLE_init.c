@@ -1,0 +1,207 @@
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "host/ble_hs.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+#include "driver/gpio.h"
+#include "os/os_mbuf.h"
+
+#include "mesh_init.h"
+#include "BLE_init.h"
+
+static const char *TAG = "BLE_APP";
+static char ble_device_name[30];            //nombre del dispositivo
+static uint8_t g_own_addr_type;             //dirección de BLE
+extern volatile float g_latest_voltage;     //voltaje
+static int ble_gap_event(struct ble_gap_event *event, void *arg);
+void ble_app_on_sync(void);
+void ble_host_task(void *param);
+
+
+static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    switch (ctxt->op)
+    {
+    case BLE_GATT_ACCESS_OP_WRITE_CHR:  //LOGICA DE ESCRITURA
+        char received[100];
+        uint16_t len = ctxt->om->om_len;
+        if (len >= sizeof(received)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        memcpy(received, ctxt->om->om_data, len);
+        received[len] = '\0';
+        ESP_LOGI(TAG, "Se recibio el comando: %s", received);
+        char *target = strtok(received, ",");
+        char *on_str = strtok(NULL, ",");
+        char *brillo_str = strtok(NULL, ",");
+        if (target != NULL && on_str != NULL && brillo_str != NULL) {
+            send_command_light(target, atoi(on_str), atoi(brillo_str));
+        } else {
+            ESP_LOGE(TAG, "Error al recibir el comando");
+        }
+        return 0;
+
+    case BLE_GATT_ACCESS_OP_READ_CHR: //LOGICA DE LECTURA
+        ESP_LOGI(TAG, "Lectura del BLE: ");
+        char voltage_str[10];
+        snprintf(voltage_str, sizeof(voltage_str), "%.2fV", g_latest_voltage);
+
+        int rc = os_mbuf_append(ctxt->om, voltage_str, strlen(voltage_str));
+        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+
+    default:
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+}
+
+const struct ble_gatt_svc_def gatt_ctrl_led[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(0xFEA0),
+        .characteristics = (struct ble_gatt_chr_def[]){
+            {
+                .uuid = BLE_UUID16_DECLARE(0xFEA1),
+                .access_cb = gatt_manager,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+            }, {0},
+        },
+    }, {0},
+};
+
+static int gatt_credenciales(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    char received_data[200];
+    uint16_t len = ctxt->om->om_len;
+    if (len >= sizeof(received_data)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    
+    memcpy(received_data, ctxt->om->om_data, len);
+    received_data[len] = '\0';
+
+    ESP_LOGI(TAG, "Credenciales recibidas por BLE: %s", received_data);
+
+    char* mesh_id = strtok(received_data, ",");
+    char* mesh_pass = strtok(NULL, ",");
+    char* router_ssid = strtok(NULL, ",");
+    char* router_pass = strtok(NULL, ",");
+
+    if (mesh_id && mesh_pass) {
+        nvs_handle_t my_handle;
+        nvs_open("mesh_config", NVS_READWRITE, &my_handle);
+        nvs_set_str(my_handle, "mesh_id", mesh_id);
+        nvs_set_str(my_handle, "mesh_pass", mesh_pass);
+        if (router_ssid && router_pass) {
+            nvs_set_str(my_handle, "router_ssid", router_ssid);
+            nvs_set_str(my_handle, "router_pass", router_pass);
+        }
+        nvs_set_u8(my_handle, "config_finish", 1);
+        nvs_commit(my_handle);
+        nvs_close(my_handle);
+
+        ESP_LOGI(TAG, "Credenciales guardadas");
+
+        ble_gap_adv_stop();                                 //detener la publicidad BLE actual
+        mesh_app_start();                                   //iniciar la red de malla (ahora que tenemos las credenciales)
+        start_ble_service("MeshLight_Node", gatt_ctrl_led); //reiniciar el BLE con los nuevos servicios de control.
+    } else {
+        ESP_LOGE(TAG, "Formato de credenciales incorrecto.");
+    }
+    return 0;
+}
+
+const struct ble_gatt_svc_def gatt_ctrl_credencial[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(0xABCD), // UUID
+        .characteristics = (struct ble_gatt_chr_def[]){
+            {
+                .uuid = BLE_UUID16_DECLARE(0x1234), // UUID de Característica
+                .access_cb = gatt_credenciales,
+                .flags = BLE_GATT_CHR_F_WRITE,
+            }, {0},
+        },
+    }, {0},
+};
+
+static void restart_ble_advertising(void) {
+    struct ble_hs_adv_fields fields;                                    //Configurar los datos básicos (nombre y flags)
+    memset(&fields, 0, sizeof(fields));         
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;    //Configurar los parámetros básicos (conectable y visible)
+    fields.name = (uint8_t *)ble_device_name;   
+    fields.name_len = strlen(ble_device_name);
+    fields.name_is_complete = 1;        
+    ESP_ERROR_CHECK(ble_gap_adv_set_fields(&fields));                   //Iniciar la publicidad
+
+    struct ble_gap_adv_params adv_params;   
+    memset(&adv_params, 0, sizeof(adv_params)); 
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;       
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;                   
+
+    ESP_ERROR_CHECK(ble_gap_adv_start(g_own_addr_type, NULL, BLE_HS_FOREVER, &adv_params, ble_gap_event, NULL));
+    
+    ESP_LOGI(TAG, "Iniciada publicidad como '%s'", ble_device_name);
+}
+
+static int ble_gap_event(struct ble_gap_event *event, void *arg) {
+    if (event->type == BLE_GAP_EVENT_CONNECT) {
+        ESP_LOGI(TAG, "Cliente BLE conectado");
+    } else if (event->type == BLE_GAP_EVENT_DISCONNECT) {
+        ESP_LOGI(TAG, "Cliente BLE desconectado");
+        // Reiniciar publicidad para que otro pueda conectarse
+        restart_ble_advertising();
+    }
+    return 0;
+}
+
+void ble_app_on_sync(void) {
+    
+    int rc = ble_hs_id_infer_auto(0, &g_own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Error al inferir la dirección; rc=%d", rc);
+        return;
+    }
+    restart_ble_advertising();
+}
+
+void ble_host_task(void *param) {
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
+
+void start_ble_service(const char* device_name, const struct ble_gatt_svc_def* services)
+{
+    static bool is_ble_initialized = false;
+    
+    // Guardar el nombre del dispositivo
+    strncpy(ble_device_name, device_name, sizeof(ble_device_name) - 1);
+    ble_device_name[sizeof(ble_device_name) - 1] = '\0';
+    
+
+    
+    if (!is_ble_initialized) {
+        nimble_port_init();
+
+        // Reiniciar los servicios GATT
+        ble_svc_gatt_init();
+        ble_gatts_count_cfg(services);
+        ble_gatts_add_svcs(services);
+
+        ble_svc_gap_device_name_set(ble_device_name);
+        ble_svc_gap_init();
+        
+        ble_hs_cfg.sync_cb = ble_app_on_sync;
+        nimble_port_freertos_init(ble_host_task);
+
+        is_ble_initialized = true;
+    } else {
+        ble_gap_adv_stop();  //detener la publicidad
+        ble_svc_gatt_init();  //reiniciar los servicios GATT
+        ble_gatts_count_cfg(services); //configurar los parametros
+        ble_gatts_add_svcs(services); //agregar los servicios
+        ble_svc_gap_device_name_set(ble_device_name); //establecer el nombre del dispositivo
+        restart_ble_advertising();  //reiniciar la publicidad
+    }
+}

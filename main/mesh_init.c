@@ -14,9 +14,12 @@
 #include "esp_log.h"
 #include "esp_mesh.h"
 #include "esp_mesh_internal.h"
-#include "mesh_light.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
+#include "freertos/task.h"
+#include "mesh_init.h"
+#include "package.h"
+
 
 /*******************************************************
  *                Macros
@@ -31,7 +34,7 @@
 /*******************************************************
  *                Variable Definitions
  *******************************************************/
-static const char *MESH_TAG = "mesh_main";
+static const char *MESH_TAG = "MESH_APP";
 static const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
 static uint8_t tx_buf[TX_SIZE] = { 0, };
 static uint8_t rx_buf[RX_SIZE] = { 0, };
@@ -40,163 +43,67 @@ static bool is_mesh_connected = false;
 static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
-uint8_t my_mac[6];
+volatile float g_latest_voltage = 0.0;
 
-mesh_light_ctl_t light_on = {
-    .cmd = MESH_CONTROL_CMD,
-    .on = 1,
-    .token_id = MESH_TOKEN_ID,
-    .token_value = MESH_TOKEN_VALUE,
-};
-
-mesh_light_ctl_t light_off = {
-    .cmd = MESH_CONTROL_CMD,
-    .on = 0,
-    .token_id = MESH_TOKEN_ID,
-    .token_value = MESH_TOKEN_VALUE,
-};
 
 /*******************************************************
  *                Function Declarations
  *******************************************************/
 
+
+static void esp_mesh_p2p_rx_main(void *arg);
+static void mesh_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+
 /*******************************************************
  *                Function Definitions
  *******************************************************/
-// void send_data(const char *playload)
-// {
-//     mesh_data_t data;
-//     data.data = (uint8:t *)playload;
-//     data.size = strlen(playload);
-//     data.proto = MESH_PROTO_BIN; //Bloque de datos en binario
-//     data.tos = MESH_TOS_P2P;     //Tipo de servicio
-
-//     mesh_addr_t parent_adress;   //Direccion del padre
-//     esp_err_t err = esp_mesh_get_parent_bssid(&parent_adress); //Obtener la direccion del padre
-//     if (err == ESP_OK) {
-//         err = esp_mesh_send(&parent_address, &data, MESH_TOS_P2P, NULL, 0); //Enviar datos al padre
-//         if (err == ESP_OK) {
-//             ESP_LOGI(MESH_TAG, "<MESH_EVENT_SEND_SUCCESS>");
-//         } else {
-//             ESP_LOGI(MESH_TAG, "<MESH_EVENT_SEND_FAIL>");
-//         }
-//     } else {
-//         ESP_LOGI(MESH_TAG, "<MESH_EVENT_GET_PARENT_FAIL>");
-//     }
-// }
-
-// void mesh_TX_task(void *arg)
-// {
-//     while(1){
-//         if(esp_mesh_is_root()){
-//             esp_err_t err;
-//             mesh_addr_t from;
-//             mesh_data_t data;
-//             uint8_t rx_buf[RX_SIZE] = { 0, };
-//             data.data = rx_buf;
-//             data.size = RX_SIZE;
-//             int flag = 0;
-//             err = esp_mesh_recv(&from, &data, portMAX_DELAY, &flag, NULL, 0);
-
-//             if (err == ESP_OK) {
-//                 ESP_LOGI(MESH_TAG, "<MESH_EVENT_RECV_SUCCESS>");
-//             } else {
-//                 ESP_LOGI(MESH_TAG, "<MESH_EVENT_RECV_FAIL>");
-//             }
-
-//         } else { //ROL del hijo
-//             //ACA IRIA UNA FUNCION DE LECTURA DE DATOS
-//             float volt = 10;
-//             char json_payload[120];
-//             snprintf(json_payload, sizeof(json_payload), "{\"mac\":\""MACSTR"\", \"volt\":%.2f}", MAC2STR(my_mac), volt);
-//             send_data(json_payload);
-//             send_data(volt);
-//             vTaskDelay(pdMS_TO_TICKS(10000));
-//         }
-//     }
-//     vTaskDelete(NULL);
-// }
-
-// void mesh_RX_task(void *arg)
-// {
-
-// }
-
-void esp_mesh_p2p_tx_main(void *arg)
+void send_command_light(const char *target_mac, int on, int brillo)
 {
-    esp_err_t err;
-    int send_count = 0;
-    mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
-    int route_table_size = 0;
-    is_running = true;
+    if(esp_mesh_is_root())
+    {
+        //inicio de paquete
+        command_light_packet_t packet;              //crear paquete
+        packet.type = PACKET_TYPE_COMMAND_LIGHT;    //tipo de paquete
+        packet.on = on;                             //estado del led
+        packet.brillo = brillo;                     //nivel del brillo del led
 
-    while (is_running) {
-        if (esp_mesh_is_root()) {
-            vTaskDelay(pdMS_TO_TICKS(5000));
+        mesh_data_t data;
+        data.proto = MESH_PROTO_BIN;                //protocolo
+        data.tos = MESH_TOS_P2P;                    //tipo de servicio
+        data.data = (uint8_t *)&packet;             //implemento el paquete
+        data.size = sizeof(packet);                 //tamaño del paquete
 
-            mesh_data_t data;
-            data.proto = MESH_PROTO_BIN;
-            data.tos = MESH_TOS_P2P;
-
-            static bool set_led_on = false;
-            char cmd_json[150];
-            snprintf(cmd_json, sizeof(cmd_json),
-                    "{\"cmd\":\"set_led\",\"target\":\"all\",\"on\":%d}",
-                    set_led_on ? 0 : 1);
-            set_led_on = !set_led_on;
-            data.data = (uint8_t *)cmd_json;
-            data.size = strlen(cmd_json);
+        //ya tengo el paquete ahora tengo que enviarlo
+        if (strcmp(target_mac, "all") == 0) { //todos los nodos
+            //memset(&packet.target, 0xFF, sizeof(mesh_addr_t));
             mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
             int route_table_size = 0;
             esp_mesh_get_routing_table(route_table, sizeof(route_table), &route_table_size);
-
-            ESP_LOGI(MESH_TAG, "RAIZ: Enviando comando a %d nodos: %s", route_table_size, cmd_json);
-            for (int i = 0; i < route_table_size; i++) {
-                ESP_LOGE("TABLAS:", "Chequeame la tabla" MACSTR, MAC2STR(route_table[i].addr));
-                err = esp_mesh_send(&route_table[i], &data, MESH_DATA_P2P, NULL, 0);
-                if (err != ESP_OK) {
-                     ESP_LOGE(MESH_TAG, "Error al enviar comando al nodo " MACSTR, MAC2STR(route_table[i].addr));
-                }
+            ESP_LOGI(MESH_TAG, "ENVIANDO A TODOS LOS NODOS UN ON:%d", on);
+            for (int i= 0; i < route_table_size; i++){
+                esp_mesh_send(&route_table[i], &data, MESH_DATA_P2P, NULL, 0);
             }
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(5000));
-            if (is_mesh_connected) {
-                mesh_data_t sensor_data;
-                sensor_data.proto = MESH_PROTO_BIN;
-                sensor_data.tos = MESH_TOS_P2P;
-                //aca funcion para leer datos
-                float volt = 10;
-                uint8_t my_mac[6];
-                esp_wifi_get_mac(WIFI_IF_STA, my_mac);
-                char data_json[120];
-                snprintf(data_json, sizeof(data_json),
-                         "{\"mac\":\""MACSTR"\", \"voltaje\":%.2f}",
-                         MAC2STR(my_mac), volt);
-                sensor_data.data = (uint8_t *)data_json;
-                sensor_data.size = strlen(data_json);
-                mesh_addr_t parent_address;
-                if (esp_mesh_get_parent_bssid(&parent_address) == ESP_OK) {
-                    err = esp_mesh_send(&parent_address, &sensor_data, MESH_DATA_P2P, NULL, 0);
-                    if (err != ESP_OK) {
-                        ESP_LOGE(MESH_TAG, "Error al enviar dato de consumo: %s", esp_err_to_name(err));
-                    }
-                }
-            }
+        } else { //solo a un nodo
+            sscanf(target_mac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", //formato %hhx: hh = hexadecimal (0-9, a-f), x = alfanumerico (a-f, 0-9)
+               &packet.target.addr[0], &packet.target.addr[1], &packet.target.addr[2],
+               &packet.target.addr[3], &packet.target.addr[4], &packet.target.addr[5]);
+            ESP_LOGI(MESH_TAG, "ENVIANDO A UN SOLO NODO MAC:"MACSTR" UN ON:%d", MAC2STR(packet.target.addr), on);
+               esp_mesh_send(&packet.target, &data, MESH_DATA_P2P, NULL, 0);
         }
+
+    } else {
+        ESP_LOGE(MESH_TAG, "No se conecta a ningun nodo");
     }
-    vTaskDelete(NULL);
 }
 
 void esp_mesh_p2p_rx_main(void *arg)
 {
-    int recv_count = 0;
     esp_err_t err;
     mesh_addr_t from;
-    int send_count = 0;
     mesh_data_t data;
     int flag = 0;
     data.data = rx_buf;
-
     is_running = true;
 
     while (is_running) 
@@ -209,25 +116,26 @@ void esp_mesh_p2p_rx_main(void *arg)
             
             ESP_LOGI(MESH_TAG, "RECV OK from " MACSTR ", size: %d", MAC2STR(from.addr), data.size);
 
-            // Añadir terminador nulo por seguridad para poder usar strstr
-            char *json_str = (char *)data.data;
-            if (data.size < RX_SIZE) {
-                json_str[data.size] = '\0';
-            }
+            uint8_t packet_type = data.data[0];
+            ESP_LOGW(MESH_TAG, "PACKET TYPE: %d", packet_type);
+            if (packet_type == PACKET_TYPE_COMMAND_LIGHT) {
+                if (data.size == sizeof(command_light_packet_t)) {
+                    command_light_packet_t *cmd = (command_light_packet_t *)data.data;
+                    uint8_t my_mac[6];
+                    esp_wifi_get_mac(WIFI_IF_STA, my_mac);
+                    bool is_broadcast = (memcmp(cmd->target.addr, (uint8_t[6]){0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, 6) == 0);
+                    bool is_for_me = (memcmp(cmd->target.addr, my_mac, 6) == 0);
 
-            // Comprobar si es un comando de luz
-            if (strstr(json_str, "\"cmd\"")) {
-                ESP_LOGI(MESH_TAG, "  -> Comando: %s", json_str);
-                if (strstr(json_str, "\"on\":1")) {
-                    gpio_set_level(2, 1); // Encender
-                } else if (strstr(json_str, "\"on\":0")) {
-                    gpio_set_level(2, 0); // Apagar
+                    if (is_broadcast || is_for_me) {
+                        ESP_LOGI(MESH_TAG, "RECIBIDO COMANDO BINARIO (on: %d). ¡Actuando!", cmd->on);
+                        gpio_set_level(2, cmd->on);
+                    }
                 }
             }
             // Comprobar si es un dato de voltaje y si somos el raíz
-            else if (strstr(json_str, "\"voltaje\"") && esp_mesh_is_root()) {
-                ESP_LOGI(MESH_TAG, "  -> Dato de Voltaje: %s", json_str);
-            }
+            // else if (strstr(json_str, "\"voltaje\"") && esp_mesh_is_root()) {
+            //     ESP_LOGI(MESH_TAG, "  -> Dato de Voltaje: %s", json_str);
+            // }
         } else if (err != ESP_ERR_MESH_TIMEOUT) {
             // Solo registrar errores que no sean un simple timeout
             ESP_LOGE(MESH_TAG, "Error al recibir: %s", esp_err_to_name(err));
@@ -241,7 +149,6 @@ esp_err_t esp_mesh_comm_p2p_start(void)
     static bool is_comm_p2p_started = false;
     if (!is_comm_p2p_started) {
         is_comm_p2p_started = true;
-        xTaskCreate(esp_mesh_p2p_tx_main, "MPTX", 3072, NULL, 5, NULL);
         xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 3072, NULL, 5, NULL);
     }
     return ESP_OK;
@@ -313,7 +220,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
                  esp_mesh_is_root() ? "<ROOT>" :
                  (mesh_layer == 2) ? "<layer2>" : "", MAC2STR(id.addr), connected->duty);
         last_layer = mesh_layer;
-        mesh_connected_indicator(mesh_layer);
+        //mesh_connected_indicator(mesh_layer);
         is_mesh_connected = true;
         if (esp_mesh_is_root()) {
             esp_netif_dhcpc_stop(netif_sta);
@@ -328,7 +235,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
                  "<MESH_EVENT_PARENT_DISCONNECTED>reason:%d",
                  disconnected->reason);
         is_mesh_connected = false;
-        mesh_disconnected_indicator();
+        //mesh_disconnected_indicator();
         mesh_layer = esp_mesh_get_layer();
     }
     break;
@@ -340,7 +247,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
                  esp_mesh_is_root() ? "<ROOT>" :
                  (mesh_layer == 2) ? "<layer2>" : "");
         last_layer = mesh_layer;
-        mesh_connected_indicator(mesh_layer);
+        //mesh_connected_indicator(mesh_layer);
     }
     break;
     case MESH_EVENT_ROOT_ADDRESS: {
@@ -455,16 +362,12 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
 
 }
 
-void app_main(void)
+esp_err_t mesh_app_start(void)
 {
-    gpio_reset_pin(2);
-    gpio_set_direction(2, GPIO_MODE_OUTPUT);
-    // ESP_ERROR_CHECK(mesh_light_init());
-    ESP_ERROR_CHECK(nvs_flash_init());
     /*  tcpip initialization */
-    ESP_ERROR_CHECK(esp_netif_init());
+    //ESP_ERROR_CHECK(esp_netif_init());
     /*  event initialization */
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    //ESP_ERROR_CHECK(esp_event_loop_create_default());
     /*  create network interfaces for mesh (only station instance saved for further manipulation, soft AP instance ignored */
     ESP_ERROR_CHECK(esp_netif_create_default_wifi_mesh_netifs(&netif_sta, NULL));
     /*  wifi initialization */
@@ -507,8 +410,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_mesh_set_ap_authmode(CONFIG_MESH_AP_AUTHMODE));
     cfg.mesh_ap.max_connection = CONFIG_MESH_AP_CONNECTIONS;
     cfg.mesh_ap.nonmesh_max_connection = CONFIG_MESH_NON_MESH_AP_CONNECTIONS;
-    memcpy((uint8_t *) &cfg.mesh_ap.password, CONFIG_MESH_AP_PASSWD,
-           strlen(CONFIG_MESH_AP_PASSWD));
+    memcpy((uint8_t *) &cfg.mesh_ap.password, CONFIG_MESH_AP_PASSWD, strlen(CONFIG_MESH_AP_PASSWD));
     ESP_ERROR_CHECK(esp_mesh_set_config(&cfg));
     /* mesh start */
     ESP_ERROR_CHECK(esp_mesh_start());
@@ -521,4 +423,5 @@ void app_main(void)
     ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",  esp_get_minimum_free_heap_size(),
              esp_mesh_is_root_fixed() ? "root fixed" : "root not fixed",
              esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)":"(tree)", esp_mesh_is_ps_enabled());
+return ESP_OK;
 }
