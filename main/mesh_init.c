@@ -58,42 +58,47 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t eve
 /*******************************************************
  *                Function Definitions
  *******************************************************/
-void send_command_light(const char *target_mac, int on, int brillo)
+
+void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
 {
-    if(esp_mesh_is_root())
-    {
-        //inicio de paquete
-        command_light_packet_t packet;              //crear paquete
-        packet.type = PACKET_TYPE_COMMAND_LIGHT;    //tipo de paquete
-        packet.on = on;                             //estado del led
-        packet.brillo = brillo;                     //nivel del brillo del led
+    mesh_packet_t packet = {0};
+    packet.cmd = cmd;
+    esp_wifi_get_mac(WIFI_IF_STA,packet.src.addr);
+    switch (packet.cmd){
+        case CMD_OFF_ALL:
+        case CMD_ON_ALL:
+        case CMD_CTRL_NODO:
+            packet.payload.led.state = state;
+            break;
+        
+        case CMD_REPORT_DATA:
+            packet.payload.report.state_led = gpio_get_level(2);
+            packet.payload.report.volt = g_latest_voltage;  //modificar
+            break;
+    }
 
-        mesh_data_t data;
-        data.proto = MESH_PROTO_BIN;                //protocolo
-        data.tos = MESH_TOS_P2P;                    //tipo de servicio
-        data.data = (uint8_t *)&packet;             //implemento el paquete
-        data.size = sizeof(packet);                 //tamaño del paquete
+    mesh_data_t data = {
+        .data = (uint8_t *)&packet,
+        .size = sizeof(packet),
+        .proto = MESH_PROTO_BIN,
+        .tos = MESH_TOS_P2P,
+    };
 
-        //ya tengo el paquete ahora tengo que enviarlo
-        if (strcmp(target_mac, "all") == 0) { //todos los nodos
-            //memset(&packet.target, 0xFF, sizeof(mesh_addr_t));
+    if (target_mac == NULL){
+        if(esp_mesh_is_root()){
+            memset(packet.target.addr,0xFF,6);
             mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
             int route_table_size = 0;
-            esp_mesh_get_routing_table(route_table, sizeof(route_table), &route_table_size);
-            ESP_LOGI(MESH_TAG, "ENVIANDO A TODOS LOS NODOS UN ON:%d", on);
-            for (int i= 0; i < route_table_size; i++){
-                esp_mesh_send(&route_table[i], &data, MESH_DATA_P2P, NULL, 0);
+            esp_mesh_get_routing_table(route_table, sizeof(route_table),&route_table_size);
+            for (int i=0; i<route_table_size;i++){
+                esp_mesh_send(&route_table[i],&data,MESH_DATA_P2P,NULL,0);
             }
-        } else { //solo a un nodo
-            sscanf(target_mac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", //formato %hhx: hh = hexadecimal (0-9, a-f), x = alfanumerico (a-f, 0-9)
-               &packet.target.addr[0], &packet.target.addr[1], &packet.target.addr[2],
-               &packet.target.addr[3], &packet.target.addr[4], &packet.target.addr[5]);
-            ESP_LOGI(MESH_TAG, "ENVIANDO A UN SOLO NODO MAC:"MACSTR" UN ON:%d", MAC2STR(packet.target.addr), on);
-               esp_mesh_send(&packet.target, &data, MESH_DATA_P2P, NULL, 0);
+        } else {
+            esp_mesh_send(NULL,&data,MESH_DATA_P2P,NULL,0);
         }
-
     } else {
-        ESP_LOGE(MESH_TAG, "No se conecta a ningun nodo");
+        memcpy(packet.target.addr, target_mac,6);
+        esp_mesh_send(&packet.target, &data, MESH_DATA_P2P, NULL, 0);
     }
 }
 
@@ -112,30 +117,55 @@ void esp_mesh_p2p_rx_main(void *arg)
         //vTaskDelay(pdMS_TO_TICKS(5000));
         err = esp_mesh_recv(&from, &data, portMAX_DELAY, &flag, NULL, 0);
         if (err == ESP_OK && data.size > 0) {
-            // Si llegamos aquí, hemos recibido datos nuevos y válidos.
-            
-            ESP_LOGI(MESH_TAG, "RECV OK from " MACSTR ", size: %d", MAC2STR(from.addr), data.size);
+            mesh_packet_t *packet_rec = (mesh_packet_t *)data.data;
+            ESP_LOGI(MESH_TAG, "comando recibido: %d de "MACSTR, packet_rec->cmd, MAC2STR(packet_rec->src.addr));
+            uint8_t my_mac[6];
+            esp_wifi_get_mac(WIFI_IF_STA, my_mac);
+            bool is_for_me = (memcmp(packet_rec->target.addr,my_mac,6) == 0);
 
-            uint8_t packet_type = data.data[0];
-            ESP_LOGW(MESH_TAG, "PACKET TYPE: %d", packet_type);
-            if (packet_type == PACKET_TYPE_COMMAND_LIGHT) {
-                if (data.size == sizeof(command_light_packet_t)) {
-                    command_light_packet_t *cmd = (command_light_packet_t *)data.data;
-                    uint8_t my_mac[6];
-                    esp_wifi_get_mac(WIFI_IF_STA, my_mac);
-                    bool is_broadcast = (memcmp(cmd->target.addr, (uint8_t[6]){0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, 6) == 0);
-                    bool is_for_me = (memcmp(cmd->target.addr, my_mac, 6) == 0);
-
-                    if (is_broadcast || is_for_me) {
-                        ESP_LOGI(MESH_TAG, "RECIBIDO COMANDO BINARIO (on: %d). ¡Actuando!", cmd->on);
-                        gpio_set_level(2, cmd->on);
+            switch (packet_rec->cmd){
+                case CMD_OFF_ALL:
+                {
+                    gpio_set_level(2, 0);
+                    break;
+                }
+                case CMD_ON_ALL:
+                {
+                    gpio_set_level(2, 1);
+                    break;
+                }
+                case CMD_CTRL_NODO:
+                {
+                    if (is_for_me){
+                        gpio_set_level(2, packet_rec->payload.led.state);
+                    } else if (esp_mesh_is_root()) {
+                        send_mesh_packet(CMD_CTRL_NODO, packet_rec->target.addr,packet_rec->payload.led.state);
                     }
+                    break;
+                }
+                case CMD_RESTART:
+                {
+                    esp_restart();
+                    break;
+                }
+                case CMD_REQ_DATA:
+                {
+                    if (is_for_me){
+                        send_mesh_packet(CMD_REPORT_DATA,NULL,0);
+                    }
+                    break;
+                }
+                case CMD_REPORT_DATA:
+                {
+                    if (esp_mesh_is_root()){
+                        ESP_LOGW(MESH_TAG,"Reporte del nodo"MACSTR"-> Voltaje: %.2fV, Led: %d",
+                                MAC2STR(packet_rec->src.addr),
+                                packet_rec->payload.report.volt,
+                                packet_rec->payload.report.state_led);
+                    }
+                    break;
                 }
             }
-            // Comprobar si es un dato de voltaje y si somos el raíz
-            // else if (strstr(json_str, "\"voltaje\"") && esp_mesh_is_root()) {
-            //     ESP_LOGI(MESH_TAG, "  -> Dato de Voltaje: %s", json_str);
-            // }
         } else if (err != ESP_ERR_MESH_TIMEOUT) {
             // Solo registrar errores que no sean un simple timeout
             ESP_LOGE(MESH_TAG, "Error al recibir: %s", esp_err_to_name(err));
@@ -370,33 +400,30 @@ esp_err_t mesh_app_start(void)
     //ESP_ERROR_CHECK(esp_event_loop_create_default());
     /*  create network interfaces for mesh (only station instance saved for further manipulation, soft AP instance ignored */
     ESP_ERROR_CHECK(esp_netif_create_default_wifi_mesh_netifs(&netif_sta, NULL));
+
     /*  wifi initialization */
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&config));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
     ESP_ERROR_CHECK(esp_wifi_start());
+
     /*  mesh initialization */
     ESP_ERROR_CHECK(esp_mesh_init());
     ESP_ERROR_CHECK(esp_event_handler_register(MESH_EVENT, ESP_EVENT_ANY_ID, &mesh_event_handler, NULL));
+
     /*  set mesh topology */
     ESP_ERROR_CHECK(esp_mesh_set_topology(CONFIG_MESH_TOPOLOGY));
+
     /*  set mesh max layer according to the topology */
     ESP_ERROR_CHECK(esp_mesh_set_max_layer(CONFIG_MESH_MAX_LAYER));
     ESP_ERROR_CHECK(esp_mesh_set_vote_percentage(1));
     ESP_ERROR_CHECK(esp_mesh_set_xon_qsize(128));
-#ifdef CONFIG_MESH_ENABLE_PS
-    /* Enable mesh PS function */
-    ESP_ERROR_CHECK(esp_mesh_enable_ps());
-    /* better to increase the associate expired time, if a small duty cycle is set. */
-    ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(60));
-    /* better to increase the announce interval to avoid too much management traffic, if a small duty cycle is set. */
-    ESP_ERROR_CHECK(esp_mesh_set_announce_interval(600, 3300));
-#else
+
     /* Disable mesh PS function */
     ESP_ERROR_CHECK(esp_mesh_disable_ps());
     ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(10));
-#endif
+
     mesh_cfg_t cfg = MESH_INIT_CONFIG_DEFAULT();
     /* mesh ID */
     memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
@@ -414,14 +441,10 @@ esp_err_t mesh_app_start(void)
     ESP_ERROR_CHECK(esp_mesh_set_config(&cfg));
     /* mesh start */
     ESP_ERROR_CHECK(esp_mesh_start());
-#ifdef CONFIG_MESH_ENABLE_PS
-    /* set the device active duty cycle. (default:10, MESH_PS_DEVICE_DUTY_REQUEST) */
-    ESP_ERROR_CHECK(esp_mesh_set_active_duty_cycle(CONFIG_MESH_PS_DEV_DUTY, CONFIG_MESH_PS_DEV_DUTY_TYPE));
-    /* set the network active duty cycle. (default:10, -1, MESH_PS_NETWORK_DUTY_APPLIED_ENTIRE) */
-    ESP_ERROR_CHECK(esp_mesh_set_network_duty_cycle(CONFIG_MESH_PS_NWK_DUTY, CONFIG_MESH_PS_NWK_DUTY_DURATION, CONFIG_MESH_PS_NWK_DUTY_RULE));
-#endif
-    ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",  esp_get_minimum_free_heap_size(),
+    ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",
+             esp_get_minimum_free_heap_size(),
              esp_mesh_is_root_fixed() ? "root fixed" : "root not fixed",
-             esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)":"(tree)", esp_mesh_is_ps_enabled());
+             esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)":"(tree)", 
+             esp_mesh_is_ps_enabled());
 return ESP_OK;
 }
