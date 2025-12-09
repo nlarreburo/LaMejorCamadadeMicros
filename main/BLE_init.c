@@ -14,8 +14,9 @@
 
 #include "mesh_init.h"
 #include "BLE_init.h"
+#include "package.h"
 
-static const char *TAG = "BLE_APP";
+static const char *BLE_TAG = "BLE_APP";
 static char ble_device_name[30];            //nombre del dispositivo
 static uint8_t g_own_addr_type;             //dirección de BLE
 extern volatile float g_latest_voltage;     //voltaje
@@ -29,24 +30,48 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
     switch (ctxt->op)
     {
     case BLE_GATT_ACCESS_OP_WRITE_CHR:  //LOGICA DE ESCRITURA
-        char received[100];
+        uint8_t received[20];
         uint16_t len = ctxt->om->om_len;
         if (len >= sizeof(received)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         memcpy(received, ctxt->om->om_data, len);
-        received[len] = '\0';
-        ESP_LOGI(TAG, "Se recibio el comando: %s", received);
-        char *target = strtok(received, ",");
-        char *on_str = strtok(NULL, ",");
-        char *brillo_str = strtok(NULL, ",");
-        if (target != NULL && on_str != NULL && brillo_str != NULL) {
-            send_command_light(target, atoi(on_str), atoi(brillo_str));
-        } else {
-            ESP_LOGE(TAG, "Error al recibir el comando");
+        uint8_t cmd_ble = received[0]; //comando
+        ESP_LOGI(BLE_TAG, "Se recibio el comando: %d", cmd_ble);
+        
+
+        switch (cmd_ble)
+        {
+            case 1:
+                send_mesh_packet(CMD_OFF_ALL, NULL, 0);
+                break;
+            case 2:
+                send_mesh_packet(CMD_ON_ALL, NULL, 0);
+                break;
+            case 3:
+                if (len>=8){
+                    uint8_t *target_mac = &received[1];
+                    uint8_t state = received[7];
+                    //ESP_LOGW(BLE_TAG,"MAC "MACSTR" Estado: %d", MAC2STR(target_mac), state);
+                    send_mesh_packet(CMD_CTRL_NODO, target_mac, state);
+                } else {
+                    ESP_LOGE(BLE_TAG, "Se ingreso mal el comando");
+                }
+                break;
+            case 4:
+                send_mesh_packet(CMD_RESTART, NULL, 0);
+                esp_restart();
+                break;
+            case 5:
+                send_mesh_packet(CMD_REQ_DATA, NULL, 0);
+                break;
+            default:
+                ESP_LOGE(BLE_TAG, "Sin comando");
+                break;
+            
+            return 0;
         }
-        return 0;
 
     case BLE_GATT_ACCESS_OP_READ_CHR: //LOGICA DE LECTURA
-        ESP_LOGI(TAG, "Lectura del BLE: ");
+        ESP_LOGI(BLE_TAG, "Lectura del BLE: ");
         char voltage_str[10];
         snprintf(voltage_str, sizeof(voltage_str), "%.2fV", g_latest_voltage);
 
@@ -81,7 +106,7 @@ static int gatt_credenciales(uint16_t conn_handle, uint16_t attr_handle, struct 
     memcpy(received_data, ctxt->om->om_data, len);
     received_data[len] = '\0';
 
-    ESP_LOGI(TAG, "Credenciales recibidas por BLE: %s", received_data);
+    ESP_LOGI(BLE_TAG, "Credenciales recibidas por BLE: %s", received_data);
 
     char* mesh_id = strtok(received_data, ",");
     char* mesh_pass = strtok(NULL, ",");
@@ -101,16 +126,17 @@ static int gatt_credenciales(uint16_t conn_handle, uint16_t attr_handle, struct 
         nvs_commit(my_handle);
         nvs_close(my_handle);
 
-        ESP_LOGI(TAG, "Credenciales guardadas");
+        ESP_LOGI(BLE_TAG, "Credenciales guardadas");
 
         ble_gap_adv_stop();                                 //detener la publicidad BLE actual
-        mesh_app_start();                                   //iniciar la red de malla (ahora que tenemos las credenciales)
-        start_ble_service("MeshLight_Node", gatt_ctrl_led); //reiniciar el BLE con los nuevos servicios de control.
+        esp_restart();                                      //reiniciar el BLE con los nuevos servicios de control.
     } else {
-        ESP_LOGE(TAG, "Formato de credenciales incorrecto.");
+        ESP_LOGE(BLE_TAG, "Formato de credenciales incorrecto.");
     }
     return 0;
 }
+
+
 
 const struct ble_gatt_svc_def gatt_ctrl_credencial[] = {
     {
@@ -132,7 +158,7 @@ static void restart_ble_advertising(void) {
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;    //Configurar los parámetros básicos (conectable y visible)
     fields.name = (uint8_t *)ble_device_name;   
     fields.name_len = strlen(ble_device_name);
-    fields.name_is_complete = 1;        
+    fields.name_is_complete = 1;
     ESP_ERROR_CHECK(ble_gap_adv_set_fields(&fields));                   //Iniciar la publicidad
 
     struct ble_gap_adv_params adv_params;   
@@ -142,14 +168,14 @@ static void restart_ble_advertising(void) {
 
     ESP_ERROR_CHECK(ble_gap_adv_start(g_own_addr_type, NULL, BLE_HS_FOREVER, &adv_params, ble_gap_event, NULL));
     
-    ESP_LOGI(TAG, "Iniciada publicidad como '%s'", ble_device_name);
+    ESP_LOGI(BLE_TAG, "Iniciada publicidad como '%s'", ble_device_name);
 }
 
 static int ble_gap_event(struct ble_gap_event *event, void *arg) {
     if (event->type == BLE_GAP_EVENT_CONNECT) {
-        ESP_LOGI(TAG, "Cliente BLE conectado");
+        ESP_LOGI(BLE_TAG, "Cliente BLE conectado");
     } else if (event->type == BLE_GAP_EVENT_DISCONNECT) {
-        ESP_LOGI(TAG, "Cliente BLE desconectado");
+        ESP_LOGI(BLE_TAG, "Cliente BLE desconectado");
         // Reiniciar publicidad para que otro pueda conectarse
         restart_ble_advertising();
     }
@@ -160,7 +186,7 @@ void ble_app_on_sync(void) {
     
     int rc = ble_hs_id_infer_auto(0, &g_own_addr_type);
     if (rc != 0) {
-        ESP_LOGE(TAG, "Error al inferir la dirección; rc=%d", rc);
+        ESP_LOGE(BLE_TAG, "Error al inferir la dirección; rc=%d", rc);
         return;
     }
     restart_ble_advertising();

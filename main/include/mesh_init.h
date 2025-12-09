@@ -1,4 +1,4 @@
 #include "esp_err.h"
-
-esp_err_t mesh_app_start(void);
-void send_command_light(const char *target_mac, int on, int brillo);
+#include "package.h"
+esp_err_t mesh_app_start(char *SSID_MESH, char *PASSWORD_MESH);
+void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state);
