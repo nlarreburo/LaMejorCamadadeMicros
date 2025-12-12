@@ -51,7 +51,10 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
                     uint8_t *target_mac = &received[1];
                     uint8_t state = received[7];
                     //ESP_LOGW(BLE_TAG,"MAC "MACSTR" Estado: %d", MAC2STR(target_mac), state);
+<<<<<<< HEAD
                     send_mesh_packet(CMD_CTRL_NODO, target_mac, state);
+=======
+>>>>>>> 1225c67660a9e83df7a085ef09ecde4ff5c8e9a2
                 } else {
                     ESP_LOGE(BLE_TAG, "Se ingreso mal el comando");
                 }

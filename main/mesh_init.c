@@ -74,7 +74,11 @@ void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
         
         case CMD_REPORT_DATA:
             packet.payload.report.state_led = gpio_get_level(2);
+<<<<<<< HEAD
             packet.payload.report.volt = ((float)rand() / RAND_MAX) * 100;  //modificar
+=======
+            packet.payload.report.volt = g_latest_voltage;  //modificar
+>>>>>>> 1225c67660a9e83df7a085ef09ecde4ff5c8e9a2
             break;
     }
 
@@ -139,7 +143,10 @@ void esp_mesh_p2p_rx_main(void *arg)
                 {
                     if (is_for_me){
                         gpio_set_level(2, packet_rec->payload.led.state);
+<<<<<<< HEAD
                         
+=======
+>>>>>>> 1225c67660a9e83df7a085ef09ecde4ff5c8e9a2
                     } else if (esp_mesh_is_root()) {
                         send_mesh_packet(CMD_CTRL_NODO, packet_rec->target.addr,packet_rec->payload.led.state);
                     }
@@ -152,7 +159,11 @@ void esp_mesh_p2p_rx_main(void *arg)
                 }
                 case CMD_REQ_DATA:
                 {
+<<<<<<< HEAD
                     if (!esp_mesh_is_root()){
+=======
+                    if (is_for_me){
+>>>>>>> 1225c67660a9e83df7a085ef09ecde4ff5c8e9a2
                         send_mesh_packet(CMD_REPORT_DATA,NULL,0);
                     }
                     break;
@@ -402,7 +413,11 @@ esp_err_t mesh_app_start(char *SSID_MESH, char *PASSWORD_MESH)
     //ESP_ERROR_CHECK(esp_event_loop_create_default());
     /*  create network interfaces for mesh (only station instance saved for further manipulation, soft AP instance ignored */
     ESP_ERROR_CHECK(esp_netif_create_default_wifi_mesh_netifs(&netif_sta, NULL));
+<<<<<<< HEAD
     srand(time(NULL));
+=======
+
+>>>>>>> 1225c67660a9e83df7a085ef09ecde4ff5c8e9a2
     /*  wifi initialization */
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&config));
