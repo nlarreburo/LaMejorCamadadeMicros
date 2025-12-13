@@ -40,11 +40,7 @@ void app_main(void)
     }
     if (config_finish == 1) {
         ESP_LOGI(TAG, "Iniciando mesh");
-<<<<<<< HEAD
         ESP_ERROR_CHECK(mesh_app_start("FaIn-Privada", "radioactividad"));
-=======
-        ESP_ERROR_CHECK(mesh_app_start());
->>>>>>> 1225c67660a9e83df7a085ef09ecde4ff5c8e9a2
         if (esp_mesh_is_root()) {
             start_ble_service("Mesh_root", gatt_ctrl_led);
         } else {

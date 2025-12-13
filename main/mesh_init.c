@@ -45,6 +45,7 @@ static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
 volatile float g_latest_voltage = 23.3;
+nodo_status_t lista_nodos[MAX_NODES] = {0};
 
 
 /*******************************************************
@@ -55,10 +56,38 @@ volatile float g_latest_voltage = 23.3;
 static void esp_mesh_p2p_rx_main(void *arg);
 static void mesh_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+void actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt);
 
 /*******************************************************
  *                Function Definitions
  *******************************************************/
+
+void actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt)
+{
+    int slot_vacio = -1;
+    bool encontrado = false;
+    for (int i=0; i<MAX_NODES;i++){
+        if (lista_nodos[i].existe && memcmp(mac,lista_nodos[i].mac,6)==0){
+            lista_nodos[i].volt = volt;
+            lista_nodos[i].status_led = estado_led;
+            encontrado = true;
+            break;
+        }
+
+        if (!lista_nodos[i].existe && slot_vacio == -1){
+            slot_vacio = i;
+        }
+    }
+
+    if (!encontrado && slot_vacio != -1){
+        memcpy(lista_nodos[slot_vacio].mac,mac,6);
+        lista_nodos[slot_vacio].volt = volt;
+        lista_nodos[slot_vacio].status_led = estado_led;
+        lista_nodos[slot_vacio].existe = true;
+    }
+
+}
+
 
 void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
 {
@@ -74,11 +103,7 @@ void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
         
         case CMD_REPORT_DATA:
             packet.payload.report.state_led = gpio_get_level(2);
-<<<<<<< HEAD
             packet.payload.report.volt = ((float)rand() / RAND_MAX) * 100;  //modificar
-=======
-            packet.payload.report.volt = g_latest_voltage;  //modificar
->>>>>>> 1225c67660a9e83df7a085ef09ecde4ff5c8e9a2
             break;
     }
 
@@ -132,21 +157,20 @@ void esp_mesh_p2p_rx_main(void *arg)
                 case CMD_OFF_ALL:
                 {
                     gpio_set_level(2, 0);
+                    send_mesh_packet(CMD_REPORT_DATA,NULL,0);
                     break;
                 }
                 case CMD_ON_ALL:
                 {
                     gpio_set_level(2, 1);
+                    send_mesh_packet(CMD_REPORT_DATA,NULL,0);
                     break;
                 }
                 case CMD_CTRL_NODO:
                 {
                     if (is_for_me){
                         gpio_set_level(2, packet_rec->payload.led.state);
-<<<<<<< HEAD
-                        
-=======
->>>>>>> 1225c67660a9e83df7a085ef09ecde4ff5c8e9a2
+                        send_mesh_packet(CMD_REPORT_DATA,NULL,0);                     
                     } else if (esp_mesh_is_root()) {
                         send_mesh_packet(CMD_CTRL_NODO, packet_rec->target.addr,packet_rec->payload.led.state);
                     }
@@ -159,11 +183,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                 }
                 case CMD_REQ_DATA:
                 {
-<<<<<<< HEAD
                     if (!esp_mesh_is_root()){
-=======
-                    if (is_for_me){
->>>>>>> 1225c67660a9e83df7a085ef09ecde4ff5c8e9a2
                         send_mesh_packet(CMD_REPORT_DATA,NULL,0);
                     }
                     break;
@@ -175,6 +195,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 MAC2STR(packet_rec->src.addr),
                                 packet_rec->payload.report.volt,
                                 packet_rec->payload.report.state_led);
+                        actualizar_lista_nodos(packet_rec->src.addr,packet_rec->payload.report.state_led,packet_rec->payload.report.volt);
                     }
                     break;
                 }
@@ -413,11 +434,7 @@ esp_err_t mesh_app_start(char *SSID_MESH, char *PASSWORD_MESH)
     //ESP_ERROR_CHECK(esp_event_loop_create_default());
     /*  create network interfaces for mesh (only station instance saved for further manipulation, soft AP instance ignored */
     ESP_ERROR_CHECK(esp_netif_create_default_wifi_mesh_netifs(&netif_sta, NULL));
-<<<<<<< HEAD
     srand(time(NULL));
-=======
-
->>>>>>> 1225c67660a9e83df7a085ef09ecde4ff5c8e9a2
     /*  wifi initialization */
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&config));
