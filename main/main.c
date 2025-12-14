@@ -19,7 +19,10 @@ void app_main(void)
 {   
     esp_err_t err;
     gpio_reset_pin(2);
-    gpio_set_direction(2, GPIO_MODE_OUTPUT);
+    gpio_set_direction(2, GPIO_MODE_INPUT_OUTPUT);
+    gpio_reset_pin(0);
+    gpio_set_direction(0, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(0, GPIO_PULLUP_ONLY);
     
     err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -40,7 +43,7 @@ void app_main(void)
     }
     if (config_finish == 1) {
         ESP_LOGI(TAG, "Iniciando mesh");
-        ESP_ERROR_CHECK(mesh_app_start());
+        ESP_ERROR_CHECK(mesh_app_start("FaIn-Privada", "radioactividad"));
         if (esp_mesh_is_root()) {
             start_ble_service("Mesh_root", gatt_ctrl_led);
         } else {
