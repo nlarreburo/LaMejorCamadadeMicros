@@ -10,7 +10,8 @@ typedef enum {
     CMD_CTRL_NODO       =3,
     CMD_RESTART         =4,
     CMD_REQ_DATA        =5,
-    CMD_REPORT_DATA     =6
+    CMD_REPORT_DATA     =6,
+    CMD_ON_OFF          =7
 } cmd_type_t;
 
 typedef struct{

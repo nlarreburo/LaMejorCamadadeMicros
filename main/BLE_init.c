@@ -64,6 +64,9 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
             case 5:
                 send_mesh_packet(CMD_REQ_DATA, NULL, 0);
                 break;
+            case 6:
+                send_mesh_packet(CMD_ON_OFF, NULL, 0);
+                break;
             default:
                 ESP_LOGE(BLE_TAG, "Sin comando");
                 break;

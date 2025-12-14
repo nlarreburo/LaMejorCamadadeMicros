@@ -54,6 +54,7 @@ nodo_status_t lista_nodos[MAX_NODES] = {0};
 
 
 static void esp_mesh_p2p_rx_main(void *arg);
+void task_boton(void *arg);
 static void mesh_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 void actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt);
@@ -61,6 +62,21 @@ void actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt);
 /*******************************************************
  *                Function Definitions
  *******************************************************/
+
+void task_boton(void *arg)
+{
+    int estado_anterior = 1;
+    while(1)
+    {
+        int estado_actual = gpio_get_level(0);
+        if (estado_anterior && (!estado_actual)){
+            gpio_set_level(2,(!gpio_get_level(2)));
+            send_mesh_packet(CMD_REPORT_DATA,NULL,0);
+        }
+        estado_anterior = estado_actual;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
 
 void actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt)
 {
@@ -97,6 +113,7 @@ void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
     switch (packet.cmd){
         case CMD_OFF_ALL:
         case CMD_ON_ALL:
+        case CMD_ON_OFF:
         case CMD_CTRL_NODO:
             packet.payload.led.state = state;
             break;
@@ -152,18 +169,27 @@ void esp_mesh_p2p_rx_main(void *arg)
             uint8_t my_mac[6];
             esp_wifi_get_mac(WIFI_IF_STA, my_mac);
             bool is_for_me = (memcmp(packet_rec->target.addr,my_mac,6) == 0);
+            bool is_broadcast = (memcmp(packet_rec->target.addr, (uint8_t[6]){0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, 6) == 0);
 
             switch (packet_rec->cmd){
                 case CMD_OFF_ALL:
                 {
-                    gpio_set_level(2, 0);
-                    send_mesh_packet(CMD_REPORT_DATA,NULL,0);
+                    if(esp_mesh_is_root() && !is_broadcast){
+                        send_mesh_packet(CMD_OFF_ALL, NULL, 0);
+                    }else if(is_broadcast){
+                        gpio_set_level(2, 0);
+                        send_mesh_packet(CMD_REPORT_DATA,NULL,0);
+                    }
                     break;
                 }
                 case CMD_ON_ALL:
-                {
-                    gpio_set_level(2, 1);
-                    send_mesh_packet(CMD_REPORT_DATA,NULL,0);
+                {   
+                    if(esp_mesh_is_root() && !is_broadcast){
+                        send_mesh_packet(CMD_ON_ALL, NULL, 0);
+                    } else if(is_broadcast){
+                        gpio_set_level(2, 1);
+                        send_mesh_packet(CMD_REPORT_DATA,NULL,0);
+                    }
                     break;
                 }
                 case CMD_CTRL_NODO:
@@ -191,11 +217,21 @@ void esp_mesh_p2p_rx_main(void *arg)
                 case CMD_REPORT_DATA:
                 {
                     if (esp_mesh_is_root()){
-                        ESP_LOGW(MESH_TAG,"Reporte del nodo"MACSTR"-> Voltaje: %.2fV, Led: %d",
+                        ESP_LOGW(MESH_TAG,"Reporte del nodo: "MACSTR" -> Voltaje: %.2fV, Led: %d",
                                 MAC2STR(packet_rec->src.addr),
                                 packet_rec->payload.report.volt,
                                 packet_rec->payload.report.state_led);
                         actualizar_lista_nodos(packet_rec->src.addr,packet_rec->payload.report.state_led,packet_rec->payload.report.volt);
+                    }
+                    break;
+                }
+                case CMD_ON_OFF:
+                {
+                    if(esp_mesh_is_root() && !is_broadcast){
+                        send_mesh_packet(CMD_ON_OFF, NULL, 0);
+                    }else if(is_broadcast){
+                        gpio_set_level(2,(!gpio_get_level(2)));
+                        send_mesh_packet(CMD_REPORT_DATA,NULL,0);
                     }
                     break;
                 }
@@ -474,6 +510,7 @@ esp_err_t mesh_app_start(char *SSID_MESH, char *PASSWORD_MESH)
     memcpy((uint8_t *) &cfg.mesh_ap.password, CONFIG_MESH_AP_PASSWD, strlen(CONFIG_MESH_AP_PASSWD));
     ESP_ERROR_CHECK(esp_mesh_set_config(&cfg));
     /* mesh start */
+    xTaskCreate(task_boton, "btn_task", 2048, NULL, 5, NULL);
     ESP_ERROR_CHECK(esp_mesh_start());
     ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",
              esp_get_minimum_free_heap_size(),
