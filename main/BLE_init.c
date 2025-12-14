@@ -15,6 +15,7 @@
 #include "mesh_init.h"
 #include "BLE_init.h"
 #include "package.h"
+#include "esp_mac.h"
 
 static const char *BLE_TAG = "BLE_APP";
 static char ble_device_name[30];            //nombre del dispositivo
@@ -51,6 +52,7 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
                     uint8_t *target_mac = &received[1];
                     uint8_t state = received[7];
                     //ESP_LOGW(BLE_TAG,"MAC "MACSTR" Estado: %d", MAC2STR(target_mac), state);
+                    send_mesh_packet(CMD_CTRL_NODO, target_mac, state);
                 } else {
                     ESP_LOGE(BLE_TAG, "Se ingreso mal el comando");
                 }
@@ -62,6 +64,9 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
             case 5:
                 send_mesh_packet(CMD_REQ_DATA, NULL, 0);
                 break;
+            case 6:
+                send_mesh_packet(CMD_ON_OFF, NULL, 0);
+                break;
             default:
                 ESP_LOGE(BLE_TAG, "Sin comando");
                 break;
@@ -70,13 +75,16 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
         }
 
     case BLE_GATT_ACCESS_OP_READ_CHR: //LOGICA DE LECTURA
-        ESP_LOGI(BLE_TAG, "Lectura del BLE: ");
-        char voltage_str[10];
-        snprintf(voltage_str, sizeof(voltage_str), "%.2fV", g_latest_voltage);
-
-        int rc = os_mbuf_append(ctxt->om, voltage_str, strlen(voltage_str));
-        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-
+        ESP_LOGI(BLE_TAG, "Envio de tabla MAC %d", MAX_NODES);
+        char buffer[100];
+        for (int i=0; i<MAX_NODES;i++){
+            if (lista_nodos[i].existe){
+                int string_ble = snprintf(buffer, sizeof(buffer), MACSTR "/%d/%.2f|", MAC2STR(lista_nodos[i].mac),lista_nodos[i].status_led,lista_nodos[i].volt);
+                ESP_LOGI(BLE_TAG, "Datos enviados: %s", buffer);
+                os_mbuf_append(ctxt->om, buffer, string_ble);
+            }
+        }
+        return 0;
     default:
         return BLE_ATT_ERR_UNLIKELY;
     }
@@ -157,7 +165,7 @@ static void restart_ble_advertising(void) {
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;    //Configurar los parámetros básicos (conectable y visible)
     fields.name = (uint8_t *)ble_device_name;   
     fields.name_len = strlen(ble_device_name);
-    fields.name_is_complete = 1;        
+    fields.name_is_complete = 1;
     ESP_ERROR_CHECK(ble_gap_adv_set_fields(&fields));                   //Iniciar la publicidad
 
     struct ble_gap_adv_params adv_params;   
