@@ -20,6 +20,7 @@
 #include "mesh_init.h"
 #include "package.h"
 #include <time.h>
+#include "BLE_init.h"
 
 
 /*******************************************************
@@ -37,7 +38,6 @@
  *******************************************************/
 static const char *MESH_TAG = "MESH_APP";
 static const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
-static uint8_t tx_buf[TX_SIZE] = { 0, };
 static uint8_t rx_buf[RX_SIZE] = { 0, };
 static bool is_running = true;
 static bool is_mesh_connected = false;
@@ -57,7 +57,7 @@ static void esp_mesh_p2p_rx_main(void *arg);
 void task_boton(void *arg);
 static void mesh_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
-void actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt);
+int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt);
 
 /*******************************************************
  *                Function Definitions
@@ -78,30 +78,31 @@ void task_boton(void *arg)
     }
 }
 
-void actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt)
+int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt)
 {
-    int slot_vacio = -1;
+    int indice = -1;
     bool encontrado = false;
     for (int i=0; i<MAX_NODES;i++){
         if (lista_nodos[i].existe && memcmp(mac,lista_nodos[i].mac,6)==0){
             lista_nodos[i].volt = volt;
             lista_nodos[i].status_led = estado_led;
             encontrado = true;
+            indice = i;
             break;
         }
 
-        if (!lista_nodos[i].existe && slot_vacio == -1){
-            slot_vacio = i;
+        if (!lista_nodos[i].existe && indice == -1){
+            indice = i;
         }
     }
 
-    if (!encontrado && slot_vacio != -1){
-        memcpy(lista_nodos[slot_vacio].mac,mac,6);
-        lista_nodos[slot_vacio].volt = volt;
-        lista_nodos[slot_vacio].status_led = estado_led;
-        lista_nodos[slot_vacio].existe = true;
+    if (!encontrado && indice != -1){
+        memcpy(lista_nodos[indice].mac,mac,6);
+        lista_nodos[indice].volt = volt;
+        lista_nodos[indice].status_led = estado_led;
+        lista_nodos[indice].existe = true;
     }
-
+    return indice;
 }
 
 
@@ -161,7 +162,6 @@ void esp_mesh_p2p_rx_main(void *arg)
     while (is_running) 
     {
         data.size = RX_SIZE;
-        //vTaskDelay(pdMS_TO_TICKS(5000));
         err = esp_mesh_recv(&from, &data, portMAX_DELAY, &flag, NULL, 0);
         if (err == ESP_OK && data.size > 0) {
             mesh_packet_t *packet_rec = (mesh_packet_t *)data.data;
@@ -221,7 +221,8 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 MAC2STR(packet_rec->src.addr),
                                 packet_rec->payload.report.volt,
                                 packet_rec->payload.report.state_led);
-                        actualizar_lista_nodos(packet_rec->src.addr,packet_rec->payload.report.state_led,packet_rec->payload.report.volt);
+                        int index_nodo = actualizar_lista_nodos(packet_rec->src.addr,packet_rec->payload.report.state_led,packet_rec->payload.report.volt);
+                        notify_nodo(index_nodo);
                     }
                     break;
                 }

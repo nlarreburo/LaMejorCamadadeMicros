@@ -24,7 +24,8 @@ extern volatile float g_latest_voltage;     //voltaje
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
 void ble_app_on_sync(void);
 void ble_host_task(void *param);
-
+uint16_t notify_handle; //ID de notificacion
+uint16_t conn_handle = BLE_HS_CONN_HANDLE_NONE;   //ID de conn
 
 static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -38,7 +39,6 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
         uint8_t cmd_ble = received[0]; //comando
         ESP_LOGI(BLE_TAG, "Se recibio el comando: %d", cmd_ble);
         
-
         switch (cmd_ble)
         {
             case 1:
@@ -71,17 +71,21 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
                 ESP_LOGE(BLE_TAG, "Sin comando");
                 break;
             
-            return 0;
         }
+        return 0;
 
     case BLE_GATT_ACCESS_OP_READ_CHR: //LOGICA DE LECTURA
         ESP_LOGI(BLE_TAG, "Envio de tabla MAC %d", MAX_NODES);
         char buffer[100];
         for (int i=0; i<MAX_NODES;i++){
             if (lista_nodos[i].existe){
-                int string_ble = snprintf(buffer, sizeof(buffer), MACSTR "/%d/%.2f|", MAC2STR(lista_nodos[i].mac),lista_nodos[i].status_led,lista_nodos[i].volt);
+                int len = snprintf(buffer, sizeof(buffer), MACSTR "/%d/%.2f|",
+                                        MAC2STR(lista_nodos[i].mac),
+                                        lista_nodos[i].status_led,
+                                        lista_nodos[i].volt);
                 ESP_LOGI(BLE_TAG, "Datos enviados: %s", buffer);
-                os_mbuf_append(ctxt->om, buffer, string_ble);
+                os_mbuf_append(ctxt->om, buffer, len);
+                
             }
         }
         return 0;
@@ -98,11 +102,40 @@ const struct ble_gatt_svc_def gatt_ctrl_led[] = {
             {
                 .uuid = BLE_UUID16_DECLARE(0xFEA1),
                 .access_cb = gatt_manager,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
+                .val_handle = &notify_handle,
             }, {0},
         },
     }, {0},
 };
+
+void notify_nodo(int index_nodo)
+{
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE){
+        return;
+    }
+    nodo_status_t *nodo = &lista_nodos[index_nodo];
+    if (!nodo->existe){
+        return;
+    }
+    char buffer[100];
+    int len = snprintf(buffer, sizeof(buffer), MACSTR"/%d/%.2f|",
+                              MAC2STR(nodo->mac),
+                              nodo->status_led,
+                              nodo->volt);
+    ESP_LOGW(BLE_TAG,"Valor del buffer: %s",buffer);
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(buffer, len); //crea el paquete
+    if(!om){
+        ESP_LOGE(BLE_TAG,"no hay memoria para notificacion");
+        return;
+    }
+    int rc = ble_gattc_notify_custom(conn_handle,notify_handle,om);
+    if (rc == 0){
+        ESP_LOGW(BLE_TAG,"notificacion enviada: %s",buffer);
+    } else {
+        ESP_LOGE(BLE_TAG,"error en la notificacion: %d",rc);
+    }
+}
 
 static int gatt_credenciales(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -143,8 +176,6 @@ static int gatt_credenciales(uint16_t conn_handle, uint16_t attr_handle, struct 
     return 0;
 }
 
-
-
 const struct ble_gatt_svc_def gatt_ctrl_credencial[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -179,12 +210,20 @@ static void restart_ble_advertising(void) {
 }
 
 static int ble_gap_event(struct ble_gap_event *event, void *arg) {
-    if (event->type == BLE_GAP_EVENT_CONNECT) {
-        ESP_LOGI(BLE_TAG, "Cliente BLE conectado");
-    } else if (event->type == BLE_GAP_EVENT_DISCONNECT) {
-        ESP_LOGI(BLE_TAG, "Cliente BLE desconectado");
-        // Reiniciar publicidad para que otro pueda conectarse
-        restart_ble_advertising();
+    switch(event->type){
+        case BLE_GAP_EVENT_CONNECT:
+        {
+            ESP_LOGI(BLE_TAG, "Cliente BLE conectado: %d",event->connect.conn_handle);
+            conn_handle = event->connect.conn_handle;
+            break;
+        }
+        case BLE_GAP_EVENT_DISCONNECT:
+        {
+            ESP_LOGI(BLE_TAG, "Cliente BLE desconectado");
+            conn_handle = event->connect.conn_handle;
+            restart_ble_advertising();
+            break;
+        }
     }
     return 0;
 }
