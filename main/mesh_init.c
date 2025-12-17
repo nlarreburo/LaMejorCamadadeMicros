@@ -1,10 +1,11 @@
-/* Mesh Internal Communication Example
+/* 
+    Mesh Internal Communication Example
 
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
+    This example code is in the Public Domain (or CC0 licensed, at your option.)
 
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
+    Unless required by applicable law or agreed to in writing, this
+    software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+    CONDITIONS OF ANY KIND, either express or implied.
 */
 #include <string.h>
 #include <inttypes.h>
@@ -57,7 +58,7 @@ static void esp_mesh_p2p_rx_main(void *arg);
 void task_boton(void *arg);
 static void mesh_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
-int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt);
+int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt, bool existe);
 
 /*******************************************************
  *                Function Definitions
@@ -78,19 +79,25 @@ void task_boton(void *arg)
     }
 }
 
-int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt)
+int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt, bool existe)
 {
+    
     int indice = -1;
     bool encontrado = false;
     for (int i=0; i<MAX_NODES;i++){
         if (lista_nodos[i].existe && memcmp(mac,lista_nodos[i].mac,6)==0){
-            lista_nodos[i].volt = volt;
-            lista_nodos[i].status_led = estado_led;
-            encontrado = true;
-            indice = i;
-            break;
+            if (existe){
+                lista_nodos[i].volt = volt;
+                lista_nodos[i].status_led = estado_led;
+                encontrado = true;
+                indice = i;
+                break;
+            } else {
+                ESP_LOGW(MESH_TAG,"Borrando nodo: "MACSTR,MAC2STR(lista_nodos[i].mac));
+                encontrado = true;
+                lista_nodos[i].existe = false;
+            }
         }
-
         if (!lista_nodos[i].existe && indice == -1){
             indice = i;
         }
@@ -221,8 +228,9 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 MAC2STR(packet_rec->src.addr),
                                 packet_rec->payload.report.volt,
                                 packet_rec->payload.report.state_led);
-                        int index_nodo = actualizar_lista_nodos(packet_rec->src.addr,packet_rec->payload.report.state_led,packet_rec->payload.report.volt);
+                        int index_nodo = actualizar_lista_nodos(packet_rec->src.addr,packet_rec->payload.report.state_led,packet_rec->payload.report.volt,true);
                         notify_nodo(index_nodo);
+                        
                     }
                     break;
                 }
@@ -284,6 +292,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
     break;
     case MESH_EVENT_CHILD_DISCONNECTED: {
         mesh_event_child_disconnected_t *child_disconnected = (mesh_event_child_disconnected_t *)event_data;
+        actualizar_lista_nodos(child_disconnected->mac,0,0,false);
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_CHILD_DISCONNECTED>aid:%d, "MACSTR"",
                  child_disconnected->aid,
                  MAC2STR(child_disconnected->mac));

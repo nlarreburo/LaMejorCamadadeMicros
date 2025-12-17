@@ -76,7 +76,7 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
 
     case BLE_GATT_ACCESS_OP_READ_CHR: //LOGICA DE LECTURA
         ESP_LOGI(BLE_TAG, "Envio de tabla MAC %d", MAX_NODES);
-        char buffer[100];
+        char buffer[100] = {0};
         for (int i=0; i<MAX_NODES;i++){
             if (lista_nodos[i].existe){
                 int len = snprintf(buffer, sizeof(buffer), MACSTR "/%d/%.2f|",
