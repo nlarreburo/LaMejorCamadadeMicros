@@ -43,7 +43,7 @@ void app_main(void)
     }
     if (config_finish == 1) {
         ESP_LOGI(TAG, "Iniciando mesh");
-        ESP_ERROR_CHECK(mesh_app_start("MaxiS24", "Wifi6998"));
+        ESP_ERROR_CHECK(mesh_app_start("1^0=0", "NAL661@@@"));
         if (esp_mesh_is_root()) {
             start_ble_service("Mesh_root", gatt_ctrl_led);
         } else {

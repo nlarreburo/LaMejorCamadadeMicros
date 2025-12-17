@@ -75,20 +75,31 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
         return 0;
 
     case BLE_GATT_ACCESS_OP_READ_CHR: //LOGICA DE LECTURA
-        ESP_LOGI(BLE_TAG, "Envio de tabla MAC %d", MAX_NODES);
-        char buffer[100] = {0};
-        for (int i=0; i<MAX_NODES;i++){
-            if (lista_nodos[i].existe){
-                int len = snprintf(buffer, sizeof(buffer), MACSTR "/%d/%.2f|",
-                                        MAC2STR(lista_nodos[i].mac),
-                                        lista_nodos[i].status_led,
-                                        lista_nodos[i].volt);
-                ESP_LOGI(BLE_TAG, "Datos enviados: %s", buffer);
-                os_mbuf_append(ctxt->om, buffer, len);
-                
+        {
+            if(esp_mesh_is_root()){
+                ESP_LOGI(BLE_TAG, "Envio de tabla MAC %d", MAX_NODES);
+                char buffer[100] = {0};
+                for (int i=0; i<MAX_NODES;i++){
+                    if (lista_nodos[i].existe){
+                        int len = snprintf(buffer, sizeof(buffer), MACSTR "/%d/%.2f|",
+                                                MAC2STR(lista_nodos[i].mac),
+                                                lista_nodos[i].status_led,
+                                                lista_nodos[i].volt);
+                        ESP_LOGI(BLE_TAG, "Datos enviados: %s", buffer);
+                        os_mbuf_append(ctxt->om, buffer, len);
+                        
+                    }
+                }
+                return 0;
+            } else {
+                char *buffer_list = tomar_buffer_list();
+                ESP_LOGW(BLE_TAG, "Datos por enviar: %s", buffer_list);
+                if (strlen(buffer_list)>0){
+                    os_mbuf_append(ctxt->om, buffer_list, strlen(buffer_list));
+                }
+                return 0;
             }
         }
-        return 0;
     default:
         return BLE_ATT_ERR_UNLIKELY;
     }
@@ -215,6 +226,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
         {
             ESP_LOGI(BLE_TAG, "Cliente BLE conectado: %d",event->connect.conn_handle);
             conn_handle = event->connect.conn_handle;
+            send_mesh_packet(CMD_REQ_LIST,NULL,0);
             break;
         }
         case BLE_GAP_EVENT_DISCONNECT:
