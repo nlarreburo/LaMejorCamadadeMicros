@@ -13,7 +13,8 @@ typedef enum {
     CMD_REPORT_DATA     =6,
     CMD_ON_OFF          =7,
     CMD_REQ_LIST        =8,
-    CMD_SEND_LIST       =9
+    CMD_SEND_LIST       =9,
+    CMD_REMOVE_LIST     =10
 } cmd_type_t;
 
 typedef struct{

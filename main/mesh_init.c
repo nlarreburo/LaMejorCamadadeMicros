@@ -102,6 +102,7 @@ int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt, b
                 lista_nodos[i].volt = volt;
                 lista_nodos[i].status_led = estado_led;
                 lista_nodos[i].activo = false;
+                break;
             }
         }
         if (!lista_nodos[i].existe && indice == -1){
@@ -219,6 +220,7 @@ void esp_mesh_p2p_rx_main(void *arg)
             esp_wifi_get_mac(WIFI_IF_STA, my_mac);
             bool is_for_me = (memcmp(packet_rec->target.addr,my_mac,6) == 0);
             bool is_broadcast = (memcmp(packet_rec->target.addr, (uint8_t[6]){0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, 6) == 0);
+            bool for_root = (memcmp(packet_rec->src.addr, my_mac, 6) == 0);
 
             switch (packet_rec->cmd){
                 case CMD_OFF_ALL:
@@ -245,11 +247,15 @@ void esp_mesh_p2p_rx_main(void *arg)
 
                 case CMD_CTRL_NODO:
                 {
-                    if (is_for_me){
+                    if(esp_mesh_is_root()){
+                        if(for_root){
+                            gpio_set_level(2, packet_rec->payload.led.state);
+                        } else {
+                            send_mesh_packet(CMD_CTRL_NODO, packet_rec->target.addr,packet_rec->payload.led.state);
+                        }
+                    } else if(is_for_me) {
                         gpio_set_level(2, packet_rec->payload.led.state);
-                        send_mesh_packet(CMD_REPORT_DATA,NULL,0);                     
-                    } else if (esp_mesh_is_root()) {
-                        send_mesh_packet(CMD_CTRL_NODO, packet_rec->target.addr,packet_rec->payload.led.state);
+                        send_mesh_packet(CMD_REPORT_DATA,NULL,0); 
                     }
                     break;
                 }
@@ -342,6 +348,20 @@ void esp_mesh_p2p_rx_main(void *arg)
                     }
                     break;
                 }
+                case CMD_REMOVE_LIST:
+                {
+                    if(esp_mesh_is_root()){
+                        
+                        for(int i = 0;i<10;i++){
+                            ESP_LOGW(MESH_TAG,"MAC SUSCRITA: %s",lista_suscriptores[i].mac);
+                            if (memcmp(lista_suscriptores[i].mac, packet_rec->src.addr, 6) == 0) {
+                                lista_suscriptores[i].activo = false;
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
             }
         } else if (err != ESP_ERR_MESH_TIMEOUT) {
             // Solo registrar errores que no sean un simple timeout
@@ -356,7 +376,7 @@ esp_err_t esp_mesh_comm_p2p_start(void)
     static bool is_comm_p2p_started = false;
     if (!is_comm_p2p_started) {
         is_comm_p2p_started = true;
-        xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 3072, NULL, 5, NULL);
+        xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 4096, NULL, 5, NULL);
     }
     return ESP_OK;
 }

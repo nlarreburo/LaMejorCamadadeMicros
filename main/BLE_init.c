@@ -233,6 +233,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
         {
             ESP_LOGI(BLE_TAG, "Cliente BLE desconectado");
             conn_handle = event->connect.conn_handle;
+            send_mesh_packet(CMD_REMOVE_LIST,NULL,0);
             restart_ble_advertising();
             break;
         }
