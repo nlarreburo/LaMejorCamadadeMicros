@@ -90,8 +90,17 @@ int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt, b
     
     int indice = -1;
     bool encontrado = false;
+
+    uint8_t my_sta_mac[6];
+    uint8_t my_ap_mac[6];
+    esp_wifi_get_mac(WIFI_IF_STA, my_sta_mac);
+    esp_wifi_get_mac(WIFI_IF_AP, my_ap_mac);
+    const uint8_t *mac_final = mac;
+    if (memcmp(mac, my_ap_mac, 6) == 0) {
+        mac_final = my_sta_mac;
+    }
     for (int i=0; i<MAX_NODES;i++){
-        if (lista_nodos[i].existe && memcmp(mac,lista_nodos[i].mac,6)==0){
+        if (lista_nodos[i].existe && memcmp(mac_final,lista_nodos[i].mac,6)==0){
             encontrado = true;
             if (activo){
                 lista_nodos[i].volt = volt;
@@ -111,8 +120,9 @@ int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt, b
         }
     }
 
-    if (!encontrado && indice != -1){
-        memcpy(lista_nodos[indice].mac,mac,6);
+    if ((!encontrado && indice != -1)){
+        memcpy(lista_nodos[indice].mac,mac_final,6);
+        ESP_LOGW(MESH_TAG,"Nodos agregados: "MACSTR,MAC2STR(mac_final));
         lista_nodos[indice].volt = volt;
         lista_nodos[indice].status_led = estado_led;
         lista_nodos[indice].existe = true;
@@ -131,23 +141,30 @@ int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt, b
 
 void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
 {
-    mesh_packet_t packet = {0};
-    packet.cmd = cmd;
-    esp_wifi_get_mac(WIFI_IF_STA,packet.src.addr);
-    switch (packet.cmd){
+    // 1. CAMBIO IMPORTANTE: Usar memoria dinámica (Heap) en lugar de Stack
+    mesh_packet_t *packet = (mesh_packet_t*) calloc(1, sizeof(mesh_packet_t));
+    if (packet == NULL) {
+        ESP_LOGE(MESH_TAG, "No hay memoria para enviar paquete");
+        return;
+    }
+
+    packet->cmd = cmd; // Ahora usamos flecha -> porque es un puntero
+    esp_wifi_get_mac(WIFI_IF_STA, packet->src.addr);
+
+    switch (packet->cmd){
         case CMD_OFF_ALL:
         case CMD_ON_ALL:
         case CMD_ON_OFF:
         case CMD_CTRL_NODO:
         {
-            packet.payload.led.state = state;
+            packet->payload.led.state = state;
             break;
         }
 
         case CMD_REPORT_DATA:
         {
-            packet.payload.report.state_led = gpio_get_level(2);
-            packet.payload.report.volt = ((float)rand() / RAND_MAX) * 100;  //modificar
+            packet->payload.report.state_led = gpio_get_level(2);
+            packet->payload.report.volt = ((float)rand() / RAND_MAX) * 100;
             break;
         }
 
@@ -161,44 +178,49 @@ void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
             int contador = 0;
             for(int i=0;i<MAX_NODES;i++){
                 if(lista_nodos[i].existe){
-                    //memcpy(packet.payload.nodos_lista.list[contador].mac,lista_nodos[i].mac,6);
-                    //packet.payload.nodos_lista.list[contador].activo=lista_nodos[i].activo;
-                    //packet.payload.nodos_lista.list[contador].existe=lista_nodos[i].existe;
-                    //packet.payload.nodos_lista.list[contador].status_led=lista_nodos[i].status_led;
-                    //packet.payload.nodos_lista.list[contador].volt=lista_nodos[i].volt;
-                    packet.payload.nodos_lista.list[contador] = lista_nodos[i];
+                    packet->payload.nodos_lista.list[contador] = lista_nodos[i];
                     contador++;
                 }
             }
-            ESP_LOGW(MESH_TAG,"contador: %d",contador);
-            packet.payload.nodos_lista.cont = contador;
+            //ESP_LOGW(MESH_TAG,"contador: %d",contador);
+            packet->payload.nodos_lista.cont = contador;
+            break;
+        }
+
+        case CMD_REMOVE_LIST:
+        {
             break;
         }
     }
 
     mesh_data_t data = {
-        .data = (uint8_t *)&packet,
-        .size = sizeof(packet),
+        .data = (uint8_t *)packet,   // Apuntamos al puntero
+        .size = sizeof(mesh_packet_t),
         .proto = MESH_PROTO_BIN,
         .tos = MESH_TOS_P2P,
     };
 
     if (target_mac == NULL){
         if(esp_mesh_is_root()){
-            memset(packet.target.addr,0xFF,6);
+            // Nota: packet->target es parte de la union/struct, asegúrate de acceder bien
+            memset(packet->target.addr, 0xFF, 6); 
+            
             mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
             int route_table_size = 0;
-            esp_mesh_get_routing_table(route_table, sizeof(route_table),&route_table_size);
-            for (int i=0; i<route_table_size;i++){
-                esp_mesh_send(&route_table[i],&data,MESH_DATA_P2P,NULL,0);
+            esp_mesh_get_routing_table(route_table, sizeof(route_table), &route_table_size);
+            for (int i=0; i<route_table_size; i++){
+                esp_mesh_send(&route_table[i], &data, MESH_DATA_P2P, NULL, 0);
             }
         } else {
-            esp_mesh_send(NULL,&data,MESH_DATA_P2P,NULL,0);
+            esp_mesh_send(NULL, &data, MESH_DATA_P2P, NULL, 0);
         }
     } else {
-        memcpy(packet.target.addr, target_mac,6);
-        esp_mesh_send(&packet.target, &data, MESH_DATA_P2P, NULL, 0);
+        memcpy(packet->target.addr, target_mac, 6);
+        esp_mesh_send(&packet->target, &data, MESH_DATA_P2P, NULL, 0);
     }
+
+    // 2. CAMBIO IMPORTANTE: Liberar la memoria
+    free(packet);
 }
 
 void esp_mesh_p2p_rx_main(void *arg)
@@ -218,10 +240,12 @@ void esp_mesh_p2p_rx_main(void *arg)
             mesh_packet_t *packet_rec = (mesh_packet_t *)data.data;
             ESP_LOGI(MESH_TAG, "comando recibido: %d de "MACSTR, packet_rec->cmd, MAC2STR(packet_rec->src.addr));
             uint8_t my_mac[6];
+            uint8_t my_ap_mac[6];
+            esp_wifi_get_mac(WIFI_IF_AP, my_ap_mac);
             esp_wifi_get_mac(WIFI_IF_STA, my_mac);
             bool is_for_me = (memcmp(packet_rec->target.addr,my_mac,6) == 0);
             bool is_broadcast = (memcmp(packet_rec->target.addr, (uint8_t[6]){0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, 6) == 0);
-            bool for_root = (memcmp(packet_rec->src.addr, my_mac, 6) == 0);
+            bool for_root = (memcmp(packet_rec->target.addr, my_mac, 6) == 0) || (memcmp(packet_rec->target.addr, my_ap_mac, 6) == 0);
 
             switch (packet_rec->cmd){
                 case CMD_OFF_ALL:
@@ -250,7 +274,12 @@ void esp_mesh_p2p_rx_main(void *arg)
                 {
                     if(esp_mesh_is_root()){
                         if(for_root){
+                            ESP_LOGW(MESH_TAG,"Entro aca?");
                             gpio_set_level(2, packet_rec->payload.led.state);
+                            uint8_t my_mac[6];
+                            esp_wifi_get_mac(WIFI_IF_STA, my_mac);
+                            int index_nodo = actualizar_lista_nodos(my_mac, packet_rec->payload.led.state, ((float)rand() / RAND_MAX) * 100, true);
+                            notify_nodo(index_nodo);
                         } else {
                             send_mesh_packet(CMD_CTRL_NODO, packet_rec->target.addr,packet_rec->payload.led.state);
                         }
@@ -303,19 +332,38 @@ void esp_mesh_p2p_rx_main(void *arg)
                 case CMD_REQ_LIST:
                 {
                     if(esp_mesh_is_root()){
-                        send_mesh_packet(CMD_SEND_LIST,packet_rec->src.addr,0);
-                        int index_lista_suscriptores = 11;
-                        for(int i = 0;i<10;i++){
+                        send_mesh_packet(CMD_SEND_LIST, packet_rec->src.addr, 0);
+                        
+                        int indice_existente = -1;
+                        int primer_hueco_libre = -1;
+
+                        for(int i = 0; i < 10; i++){
                             if (memcmp(lista_suscriptores[i].mac, packet_rec->src.addr, 6) == 0) {
-                                lista_suscriptores[i].activo = true;
+                                indice_existente = i;
                                 break;
-                            } else if (!lista_suscriptores[i].activo && index_lista_suscriptores>i){
-                                index_lista_suscriptores = i;
+                            }
+                            if (!lista_suscriptores[i].activo && primer_hueco_libre == -1){
+                                primer_hueco_libre = i;
                             } 
                         }
-                        if (index_lista_suscriptores<11){
-                            memcpy(lista_suscriptores[index_lista_suscriptores].mac,packet_rec->src.addr,6);
-                            lista_suscriptores[index_lista_suscriptores].activo = true;
+
+                        if (indice_existente != -1) {
+                            lista_suscriptores[indice_existente].activo = true;
+                            ESP_LOGI(MESH_TAG, "Re-suscribiendo nodo existente en indice %d", indice_existente);
+                        } 
+                        else if (primer_hueco_libre != -1) {
+                            memcpy(lista_suscriptores[primer_hueco_libre].mac, packet_rec->src.addr, 6);
+                            lista_suscriptores[primer_hueco_libre].activo = true;
+                            ESP_LOGI(MESH_TAG, "Suscribiendo nuevo nodo en indice %d", primer_hueco_libre);
+                        } 
+                        else {
+                            ESP_LOGW(MESH_TAG, "Lista de suscriptores llena");
+                        }
+                        for(int i = 0; i < 10; i++){
+                            ESP_LOGW(MESH_TAG, "MAC LISTA %d: " MACSTR " Activo: %s", 
+                                     i, 
+                                     MAC2STR(lista_suscriptores[i].mac), 
+                                     lista_suscriptores[i].activo ? "SI" : "NO");
                         }
                     }
                     break;
@@ -323,7 +371,7 @@ void esp_mesh_p2p_rx_main(void *arg)
 
                 case CMD_SEND_LIST:
                 {
-                    if(is_for_me){
+                    if(is_for_me && !for_root){
                         
                         memset(g_buffer_list, 0, sizeof(g_buffer_list));
                         int puntero = 0;
@@ -335,13 +383,14 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 MAC2STR(packet_rec->payload.nodos_lista.list[i].mac),
                                 packet_rec->payload.nodos_lista.list[i].status_led,
                                 packet_rec->payload.nodos_lista.list[i].volt);
+                                //packet_rec->payload.nodos_lista.list[i].activo ? 1 : 0
                                 struct os_mbuf *om = ble_hs_mbuf_from_flat(g_buffer_list + puntero, len); 
                                 int rc = ble_gattc_notify_custom(conn_handle,notify_handle,om);
                                 if (len>0){
                                     puntero += len;
                                 }
                                 if (puntero >= sizeof(g_buffer_list)){
-                                    ESP_LOGW(MESH_TAG,"Se recibio los datos en el hijo %s",g_buffer_list);
+                                    ESP_LOGW(MESH_TAG,"Sea recibio los datos en el hijo %s",g_buffer_list);
                                     break;
                                 }
                             }
@@ -353,10 +402,9 @@ void esp_mesh_p2p_rx_main(void *arg)
                 case CMD_REMOVE_LIST:
                 {
                     if(esp_mesh_is_root()){
-                        
                         for(int i = 0;i<10;i++){
-                            ESP_LOGW(MESH_TAG,"MAC SUSCRITA: %s",lista_suscriptores[i].mac);
                             if (memcmp(lista_suscriptores[i].mac, packet_rec->src.addr, 6) == 0) {
+                                ESP_LOGW(MESH_TAG,"MAC DESUSCRITA: "MACSTR,MAC2STR(lista_suscriptores[i].mac));
                                 lista_suscriptores[i].activo = false;
                                 break;
                             }

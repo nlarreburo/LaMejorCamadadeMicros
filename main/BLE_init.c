@@ -85,6 +85,7 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
                                                 MAC2STR(lista_nodos[i].mac),
                                                 lista_nodos[i].status_led,
                                                 lista_nodos[i].volt);
+                                                //lista_nodos[i].activo ? 1 : 0
                         ESP_LOGI(BLE_TAG, "Datos enviados: %s", buffer);
                         os_mbuf_append(ctxt->om, buffer, len);
                         
@@ -134,6 +135,7 @@ void notify_nodo(int index_nodo)
                               MAC2STR(nodo->mac),
                               nodo->status_led,
                               nodo->volt);
+                              //nodo->activo ? 1 : 0
     ESP_LOGW(BLE_TAG,"Valor del buffer: %s",buffer);
     struct os_mbuf *om = ble_hs_mbuf_from_flat(buffer, len); //crea el paquete
     if(!om){
