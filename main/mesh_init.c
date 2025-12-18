@@ -69,6 +69,7 @@ char* tomar_buffer_list(void){
     return g_buffer_list;
 }
 
+
 void task_boton(void *arg)
 {
     int estado_anterior = 1;
@@ -334,7 +335,8 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 MAC2STR(packet_rec->payload.nodos_lista.list[i].mac),
                                 packet_rec->payload.nodos_lista.list[i].status_led,
                                 packet_rec->payload.nodos_lista.list[i].volt);
-                                
+                                struct os_mbuf *om = ble_hs_mbuf_from_flat(g_buffer_list + puntero, len); 
+                                int rc = ble_gattc_notify_custom(conn_handle,notify_handle,om);
                                 if (len>0){
                                     puntero += len;
                                 }
