@@ -22,6 +22,7 @@
 #include "package.h"
 #include <time.h>
 #include "BLE_init.h"
+#include "mqtt.h"
 
 
 /*******************************************************
@@ -48,6 +49,7 @@ static esp_netif_t *netif_sta = NULL;
 nodo_status_t lista_nodos[MAX_NODES] = {0};
 ble_subscriber_t lista_suscriptores[10] = {0};
 static char g_buffer_list[1024] = {0};
+static bool mqtt_started = false;
 
 
 /*******************************************************
@@ -96,31 +98,31 @@ int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt, b
     esp_wifi_get_mac(WIFI_IF_STA, my_sta_mac);
     esp_wifi_get_mac(WIFI_IF_AP, my_ap_mac);
     const uint8_t *mac_final = mac;
-    if (memcmp(mac, my_ap_mac, 6) == 0) {
-        mac_final = my_sta_mac;
-    }
+    if (memcmp(mac, my_ap_mac, 6) == 0) { //IMPORTANTE el root tiene 2 mac, AP y STA, para nuesta lista de nodos nos interesa la STA, por lo tanto verificamos y corregimos
+        mac_final = my_sta_mac;           //MAC STA (station) -> es la mac que usamos para conectarnos al router internet
+    }                                     //MAC AP (soft acces point) -> punto de acceso, es la mac que los nodos hijos "pueden ver" y conectarse
     for (int i=0; i<MAX_NODES;i++){
         if (lista_nodos[i].existe && memcmp(mac_final,lista_nodos[i].mac,6)==0){
             encontrado = true;
-            if (activo){
+            if (activo){                                                                     //Caso 1: El nodo ya existe y esta activo -> Actualizar datos
                 lista_nodos[i].volt = volt;
                 lista_nodos[i].status_led = estado_led;
                 indice = i;
+                subir_a_thingsboard(lista_nodos[i].mac, lista_nodos[i].status_led);
                 break;
-            } else {
-                ESP_LOGW(MESH_TAG,"Borrando nodo: "MACSTR,MAC2STR(lista_nodos[i].mac));
+            } else {                                                                         //Caso 2: El nodo existe pero se desconecto -> Marcarlo como inactivo
                 lista_nodos[i].volt = volt;
                 lista_nodos[i].status_led = estado_led;
                 lista_nodos[i].activo = false;
                 break;
             }
         }
-        if (!lista_nodos[i].existe && indice == -1){
+        if (!lista_nodos[i].existe && indice == -1){    //buscamos lugar libre
             indice = i;
         }
     }
 
-    if ((!encontrado && indice != -1)){
+    if ((!encontrado && indice != -1)){                 //guardamos el nodo
         memcpy(lista_nodos[indice].mac,mac_final,6);
         ESP_LOGW(MESH_TAG,"Nodos agregados: "MACSTR,MAC2STR(mac_final));
         lista_nodos[indice].volt = volt;
@@ -129,7 +131,7 @@ int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt, b
         lista_nodos[indice].activo = true;
     }
 
-    for(int i=0;i<10;i++){
+    for(int i=0;i<10;i++){                              //propago la lista de nodos actualizada a mis suscriones de BLE
         if (lista_suscriptores[i].activo){
             send_mesh_packet(CMD_SEND_LIST,lista_suscriptores[i].mac,0);
         }
@@ -141,17 +143,17 @@ int actualizar_lista_nodos(const uint8_t *mac, uint8_t estado_led, float volt, b
 
 void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
 {
-    // 1. CAMBIO IMPORTANTE: Usar memoria dinámica (Heap) en lugar de Stack
-    mesh_packet_t *packet = (mesh_packet_t*) calloc(1, sizeof(mesh_packet_t));
+    //CAMBIO IMPORTANTE: Usar memoria dinámica (Heap) en lugar de Stack
+    mesh_packet_t *packet = (mesh_packet_t*) calloc(1, sizeof(mesh_packet_t)); //calloc -> clear allocation, da memoria con ceros
     if (packet == NULL) {
         ESP_LOGE(MESH_TAG, "No hay memoria para enviar paquete");
         return;
     }
 
-    packet->cmd = cmd; // Ahora usamos flecha -> porque es un puntero
-    esp_wifi_get_mac(WIFI_IF_STA, packet->src.addr);
+    packet->cmd = cmd;
+    esp_wifi_get_mac(WIFI_IF_STA, packet->src.addr);    //Guardo la mac del emisor
 
-    switch (packet->cmd){
+    switch (packet->cmd){ //Dependiendo del comando que llegue vamos a llenar el "union" del paquete
         case CMD_OFF_ALL:
         case CMD_ON_ALL:
         case CMD_ON_OFF:
@@ -173,16 +175,15 @@ void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
             break;
         }
 
-        case CMD_SEND_LIST:
+        case CMD_SEND_LIST: // el Root envía la lista completa de nodos conocidos
         {
             int contador = 0;
             for(int i=0;i<MAX_NODES;i++){
-                if(lista_nodos[i].existe){
+                if(lista_nodos[i].existe){ //copiamos los nodos que existen
                     packet->payload.nodos_lista.list[contador] = lista_nodos[i];
                     contador++;
                 }
             }
-            //ESP_LOGW(MESH_TAG,"contador: %d",contador);
             packet->payload.nodos_lista.cont = contador;
             break;
         }
@@ -194,16 +195,15 @@ void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
     }
 
     mesh_data_t data = {
-        .data = (uint8_t *)packet,   // Apuntamos al puntero
-        .size = sizeof(mesh_packet_t),
-        .proto = MESH_PROTO_BIN,
-        .tos = MESH_TOS_P2P,
+        .data = (uint8_t *)packet,      //puntero a nuestra estructura
+        .size = sizeof(mesh_packet_t),  //tamaño total
+        .proto = MESH_PROTO_BIN,        //protocolo binario
+        .tos = MESH_TOS_P2P,            //tipo de servicio
     };
 
-    if (target_mac == NULL){
-        if(esp_mesh_is_root()){
-            // Nota: packet->target es parte de la union/struct, asegúrate de acceder bien
-            memset(packet->target.addr, 0xFF, 6); 
+    if (target_mac == NULL){            //si no tenemos destinatario
+        if(esp_mesh_is_root()){         //si no hay destinatario y soy root hago un broadcast a todos los nodos de la tabla de ruteo
+            memset(packet->target.addr, 0xFF, 6);   //broadcast interna para logica
             
             mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
             int route_table_size = 0;
@@ -211,16 +211,15 @@ void send_mesh_packet(cmd_type_t cmd, const uint8_t *target_mac, uint8_t state)
             for (int i=0; i<route_table_size; i++){
                 esp_mesh_send(&route_table[i], &data, MESH_DATA_P2P, NULL, 0);
             }
-        } else {
+        } else {    //si soy hijo envio para arriba (root)
             esp_mesh_send(NULL, &data, MESH_DATA_P2P, NULL, 0);
         }
-    } else {
+    } else { //si tenemos direccion tenemos un p2p
         memcpy(packet->target.addr, target_mac, 6);
         esp_mesh_send(&packet->target, &data, MESH_DATA_P2P, NULL, 0);
     }
 
-    // 2. CAMBIO IMPORTANTE: Liberar la memoria
-    free(packet);
+    free(packet);   //libero memoria
 }
 
 void esp_mesh_p2p_rx_main(void *arg)
@@ -234,21 +233,21 @@ void esp_mesh_p2p_rx_main(void *arg)
 
     while (is_running) 
     {
-        data.size = RX_SIZE;
-        err = esp_mesh_recv(&from, &data, portMAX_DELAY, &flag, NULL, 0);
+        data.size = RX_SIZE;    //resetear el tamaño esperado en cada iteracion
+        err = esp_mesh_recv(&from, &data, portMAX_DELAY, &flag, NULL, 0); //espera el paquete (bloqueante)
         if (err == ESP_OK && data.size > 0) {
-            mesh_packet_t *packet_rec = (mesh_packet_t *)data.data;
+            mesh_packet_t *packet_rec = (mesh_packet_t *)data.data;     // convertimos los bytes crudos a nuestra estructura mesh_packet_t
             ESP_LOGI(MESH_TAG, "comando recibido: %d de "MACSTR, packet_rec->cmd, MAC2STR(packet_rec->src.addr));
             uint8_t my_mac[6];
             uint8_t my_ap_mac[6];
             esp_wifi_get_mac(WIFI_IF_AP, my_ap_mac);
             esp_wifi_get_mac(WIFI_IF_STA, my_mac);
-            bool is_for_me = (memcmp(packet_rec->target.addr,my_mac,6) == 0);
-            bool is_broadcast = (memcmp(packet_rec->target.addr, (uint8_t[6]){0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, 6) == 0);
-            bool for_root = (memcmp(packet_rec->target.addr, my_mac, 6) == 0) || (memcmp(packet_rec->target.addr, my_ap_mac, 6) == 0);
+            bool is_for_me = (memcmp(packet_rec->target.addr,my_mac,6) == 0);   //verifico si va mi mac
+            bool is_broadcast = (memcmp(packet_rec->target.addr, (uint8_t[6]){0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, 6) == 0); //verifico si va para todos
+            bool for_root = (memcmp(packet_rec->target.addr, my_mac, 6) == 0) || (memcmp(packet_rec->target.addr, my_ap_mac, 6) == 0);  //verifico si va al root
 
-            switch (packet_rec->cmd){
-                case CMD_OFF_ALL:
+            switch (packet_rec->cmd){   //procesamos el comando que nos llega
+                case CMD_OFF_ALL:       //apagamos todos los led de los nodos, si soy root propago el msj, si soy nodo (broadcast) lo ejecuto
                 {
                     if(esp_mesh_is_root() && !is_broadcast){
                         send_mesh_packet(CMD_OFF_ALL, NULL, 0);
@@ -259,7 +258,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                     break;
                 }
 
-                case CMD_ON_ALL:
+                case CMD_ON_ALL:    //encendemos todos los led de los nodos, si soy root propago el msj, si soy nodo (broadcast) lo ejecuto
                 {   
                     if(esp_mesh_is_root() && !is_broadcast){
                         send_mesh_packet(CMD_ON_ALL, NULL, 0);
@@ -270,22 +269,22 @@ void esp_mesh_p2p_rx_main(void *arg)
                     break;
                 }
 
-                case CMD_CTRL_NODO:
+                case CMD_CTRL_NODO: //control individual de un nodo especifico por mac
                 {
                     if(esp_mesh_is_root()){
-                        if(for_root){
+                        if(for_root){       //caso si root se controla a si mismo
                             ESP_LOGW(MESH_TAG,"Entro aca?");
                             gpio_set_level(2, packet_rec->payload.led.state);
                             uint8_t my_mac[6];
                             esp_wifi_get_mac(WIFI_IF_STA, my_mac);
                             int index_nodo = actualizar_lista_nodos(my_mac, packet_rec->payload.led.state, ((float)rand() / RAND_MAX) * 100, true);
                             notify_nodo(index_nodo);
-                        } else {
+                        } else {            //si no es para el root, reenvio al destino
                             send_mesh_packet(CMD_CTRL_NODO, packet_rec->target.addr,packet_rec->payload.led.state);
                         }
-                    } else if(is_for_me) {
+                    } else if(is_for_me) {  //caso si soy nodo hijo, y es para mi
                         gpio_set_level(2, packet_rec->payload.led.state);
-                        send_mesh_packet(CMD_REPORT_DATA,NULL,0); 
+                        send_mesh_packet(CMD_REPORT_DATA,NULL,0);   //responder al root con mi nuevo estado
                     }
                     break;
                 }
@@ -296,7 +295,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                     break;
                 }
 
-                case CMD_REQ_DATA:
+                case CMD_REQ_DATA:      //solicitud de datos: si NO SOY ROOT, envio mi reporte
                 {
                     if (!esp_mesh_is_root()){
                         send_mesh_packet(CMD_REPORT_DATA,NULL,0);
@@ -304,7 +303,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                     break;
                 }
 
-                case CMD_REPORT_DATA:
+                case CMD_REPORT_DATA:   //reporte de datos, solo el root procesa los reportes para actualizar la tabla global
                 {
                     if (esp_mesh_is_root()){
                         ESP_LOGW(MESH_TAG,"Reporte del nodo: "MACSTR" -> Voltaje: %.2fV, Led: %d",
@@ -318,7 +317,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                     break;
                 }
 
-                case CMD_ON_OFF:
+                case CMD_ON_OFF: //invierto estado del led
                 {
                     if(esp_mesh_is_root() && !is_broadcast){
                         send_mesh_packet(CMD_ON_OFF, NULL, 0);
@@ -329,29 +328,29 @@ void esp_mesh_p2p_rx_main(void *arg)
                     break;
                 }
 
-                case CMD_REQ_LIST:
+                case CMD_REQ_LIST: //lista y gestion de suscripciones de BLE
                 {
                     if(esp_mesh_is_root()){
-                        send_mesh_packet(CMD_SEND_LIST, packet_rec->src.addr, 0);
+                        send_mesh_packet(CMD_SEND_LIST, packet_rec->src.addr, 0);   //enviar la tabla actual al solicitante
                         
                         int indice_existente = -1;
                         int primer_hueco_libre = -1;
 
                         for(int i = 0; i < 10; i++){
-                            if (memcmp(lista_suscriptores[i].mac, packet_rec->src.addr, 6) == 0) {
+                            if (memcmp(lista_suscriptores[i].mac, packet_rec->src.addr, 6) == 0) {  //verifico si existe la mac
                                 indice_existente = i;
                                 break;
                             }
-                            if (!lista_suscriptores[i].activo && primer_hueco_libre == -1){
+                            if (!lista_suscriptores[i].activo && primer_hueco_libre == -1){         //busco hueco libre
                                 primer_hueco_libre = i;
                             } 
                         }
 
-                        if (indice_existente != -1) {
-                            lista_suscriptores[indice_existente].activo = true;
+                        if (indice_existente != -1) {           //reactivo
+                            lista_suscriptores[indice_existente].activo = true; 
                             ESP_LOGI(MESH_TAG, "Re-suscribiendo nodo existente en indice %d", indice_existente);
                         } 
-                        else if (primer_hueco_libre != -1) {
+                        else if (primer_hueco_libre != -1) {    //nuevo
                             memcpy(lista_suscriptores[primer_hueco_libre].mac, packet_rec->src.addr, 6);
                             lista_suscriptores[primer_hueco_libre].activo = true;
                             ESP_LOGI(MESH_TAG, "Suscribiendo nuevo nodo en indice %d", primer_hueco_libre);
@@ -359,7 +358,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                         else {
                             ESP_LOGW(MESH_TAG, "Lista de suscriptores llena");
                         }
-                        for(int i = 0; i < 10; i++){
+                        for(int i = 0; i < 10; i++){            //debug de la lista
                             ESP_LOGW(MESH_TAG, "MAC LISTA %d: " MACSTR " Activo: %s", 
                                      i, 
                                      MAC2STR(lista_suscriptores[i].mac), 
@@ -369,13 +368,13 @@ void esp_mesh_p2p_rx_main(void *arg)
                     break;
                 }
 
-                case CMD_SEND_LIST:
+                case CMD_SEND_LIST: //recepcion de la lista BLE
                 {
                     if(is_for_me && !for_root){
                         
-                        memset(g_buffer_list, 0, sizeof(g_buffer_list));
+                        memset(g_buffer_list, 0, sizeof(g_buffer_list));    //cnstruimos un string grande concatenando los datos de los nodos
                         int puntero = 0;
-                        for(int i=0;i<packet_rec->payload.nodos_lista.cont;i++){
+                        for(int i=0;i<packet_rec->payload.nodos_lista.cont;i++){    //iteramos sobre los nodos que vienen en el paquete, con un formato especializado para la app ble
                             if (packet_rec->payload.nodos_lista.list[i].existe){
                                 int len = snprintf(g_buffer_list + puntero,
                                 sizeof(g_buffer_list)-puntero,
@@ -384,12 +383,12 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 packet_rec->payload.nodos_lista.list[i].status_led,
                                 packet_rec->payload.nodos_lista.list[i].volt);
                                 //packet_rec->payload.nodos_lista.list[i].activo ? 1 : 0
-                                struct os_mbuf *om = ble_hs_mbuf_from_flat(g_buffer_list + puntero, len); 
+                                struct os_mbuf *om = ble_hs_mbuf_from_flat(g_buffer_list + puntero, len);   //enviamos notificacion parcial por BLE (NimBLE maneja la fragmentacion si es necesario)
                                 int rc = ble_gattc_notify_custom(conn_handle,notify_handle,om);
-                                if (len>0){
+                                if (len>0){ //movemos el puntero
                                     puntero += len;
                                 }
-                                if (puntero >= sizeof(g_buffer_list)){
+                                if (puntero >= sizeof(g_buffer_list)){  //evitar desbordamiento de buffer
                                     ESP_LOGW(MESH_TAG,"Sea recibio los datos en el hijo %s",g_buffer_list);
                                     break;
                                 }
@@ -399,9 +398,9 @@ void esp_mesh_p2p_rx_main(void *arg)
                     }
                     break;
                 }
-                case CMD_REMOVE_LIST:
+                case CMD_REMOVE_LIST:   //desuscripcion de la lista BLE
                 {
-                    if(esp_mesh_is_root()){
+                    if(esp_mesh_is_root()){ 
                         for(int i = 0;i<10;i++){
                             if (memcmp(lista_suscriptores[i].mac, packet_rec->src.addr, 6) == 0) {
                                 ESP_LOGW(MESH_TAG,"MAC DESUSCRITA: "MACSTR,MAC2STR(lista_suscriptores[i].mac));
@@ -414,7 +413,6 @@ void esp_mesh_p2p_rx_main(void *arg)
                 }
             }
         } else if (err != ESP_ERR_MESH_TIMEOUT) {
-            // Solo registrar errores que no sean un simple timeout
             ESP_LOGE(MESH_TAG, "Error al recibir: %s", esp_err_to_name(err));
         }
     }
@@ -453,7 +451,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
     break;
     case MESH_EVENT_CHILD_CONNECTED: {
         mesh_event_child_connected_t *child_connected = (mesh_event_child_connected_t *)event_data;
-        actualizar_lista_nodos(child_connected->mac,0,0,true);
+        actualizar_lista_nodos(child_connected->mac,0,0,true);      //soy root y un nodo hijo se conecta, actualizo la lista de nodos
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_CHILD_CONNECTED>aid:%d, "MACSTR"",
                  child_connected->aid,
                  MAC2STR(child_connected->mac));
@@ -461,7 +459,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
     break;
     case MESH_EVENT_CHILD_DISCONNECTED: {
         mesh_event_child_disconnected_t *child_disconnected = (mesh_event_child_disconnected_t *)event_data;
-        actualizar_lista_nodos(child_disconnected->mac,0,0,false);
+        actualizar_lista_nodos(child_disconnected->mac,0,0,false);  //soy root y un nodo hijo se desconecta, actualizo la lista de nodos
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_CHILD_DISCONNECTED>aid:%d, "MACSTR"",
                  child_disconnected->aid,
                  MAC2STR(child_disconnected->mac));
@@ -526,12 +524,11 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
                  esp_mesh_is_root() ? "<ROOT>" :
                  (mesh_layer == 2) ? "<layer2>" : "");
         last_layer = mesh_layer;
-        //mesh_connected_indicator(mesh_layer);
     }
     break;
     case MESH_EVENT_ROOT_ADDRESS: {
         mesh_event_root_address_t *root_addr = (mesh_event_root_address_t *)event_data;
-        actualizar_lista_nodos(root_addr->addr,0,0,true);
+        actualizar_lista_nodos(root_addr->addr,0,0,true);   
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_ROOT_ADDRESS>root address:"MACSTR"",
                  MAC2STR(root_addr->addr));
     }
@@ -639,7 +636,11 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
 {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
     ESP_LOGI(MESH_TAG, "<IP_EVENT_STA_GOT_IP>IP:" IPSTR, IP2STR(&event->ip_info.ip));
-
+    if (esp_mesh_is_root() && !mqtt_started) {  //inicio mqtt
+        ESP_LOGI(MESH_TAG, "Root con IP asignada, inicializando MQTT");
+        mqtt5_app_start();
+        mqtt_started = true;
+    }
 }
 
 esp_err_t mesh_app_start(char *SSID_MESH, char *PASSWORD_MESH)

@@ -35,36 +35,35 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
         uint8_t received[20];
         uint16_t len = ctxt->om->om_len;
         if (len >= sizeof(received)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-        memcpy(received, ctxt->om->om_data, len);
+        memcpy(received, ctxt->om->om_data, len);   //copiar datos del mbuf a nuestro buffer local
         uint8_t cmd_ble = received[0]; //comando
         ESP_LOGI(BLE_TAG, "Se recibio el comando: %d", cmd_ble);
         
         switch (cmd_ble)
         {
-            case 1:
+            case 1: //apagar todo (Broadcast)
                 send_mesh_packet(CMD_OFF_ALL, NULL, 0);
                 break;
-            case 2:
+            case 2: //encender todo (Broadcast)
                 send_mesh_packet(CMD_ON_ALL, NULL, 0);
                 break;
-            case 3:
-                if (len>=8){
+            case 3: //controlar un nodo especifico
+                if (len>=8){    //formato esperado: [CMD(1)] + [MAC(6)] + [STATE(1)] = 8 bytes
                     uint8_t *target_mac = &received[1];
                     uint8_t state = received[7];
-                    //ESP_LOGW(BLE_TAG,"MAC "MACSTR" Estado: %d", MAC2STR(target_mac), state);
                     send_mesh_packet(CMD_CTRL_NODO, target_mac, state);
                 } else {
                     ESP_LOGE(BLE_TAG, "Se ingreso mal el comando");
                 }
                 break;
-            case 4:
+            case 4: //rainiciar
                 send_mesh_packet(CMD_RESTART, NULL, 0);
                 esp_restart();
                 break;
-            case 5:
+            case 5: //solicitar actualizacion de datos (Voltaje/Estado)
                 send_mesh_packet(CMD_REQ_DATA, NULL, 0);
                 break;
-            case 6:
+            case 6: //on/off
                 send_mesh_packet(CMD_ON_OFF, NULL, 0);
                 break;
             default:
@@ -76,7 +75,7 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
 
     case BLE_GATT_ACCESS_OP_READ_CHR: //LOGICA DE LECTURA
         {
-            if(esp_mesh_is_root()){
+            if(esp_mesh_is_root()){ //si soy root, formateo los datos y envio al BLE
                 ESP_LOGI(BLE_TAG, "Envio de tabla MAC %d", MAX_NODES);
                 char buffer[100] = {0};
                 for (int i=0; i<MAX_NODES;i++){
@@ -92,7 +91,7 @@ static int gatt_manager(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
                     }
                 }
                 return 0;
-            } else {
+            } else {                //si soy hijo, pido los datos formateados y envio al BLE
                 char *buffer_list = tomar_buffer_list();
                 ESP_LOGW(BLE_TAG, "Datos por enviar: %s", buffer_list);
                 if (strlen(buffer_list)>0){
@@ -123,15 +122,15 @@ const struct ble_gatt_svc_def gatt_ctrl_led[] = {
 
 void notify_nodo(int index_nodo)
 {
-    if (conn_handle == BLE_HS_CONN_HANDLE_NONE){
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE){    //verificamos conexion de BLE
         return;
     }
-    nodo_status_t *nodo = &lista_nodos[index_nodo];
-    if (!nodo->existe){
+    nodo_status_t *nodo = &lista_nodos[index_nodo]; //puntero al nodo para acceder a la lista de nodos
+    if (!nodo->existe){ //aseguremos que existe
         return;
     }
     char buffer[100];
-    int len = snprintf(buffer, sizeof(buffer), MACSTR"/%d/%.2f|",
+    int len = snprintf(buffer, sizeof(buffer), MACSTR"/%d/%.2f|",   //realizamos el formateo para la app BLE
                               MAC2STR(nodo->mac),
                               nodo->status_led,
                               nodo->volt);
@@ -142,7 +141,7 @@ void notify_nodo(int index_nodo)
         ESP_LOGE(BLE_TAG,"no hay memoria para notificacion");
         return;
     }
-    int rc = ble_gattc_notify_custom(conn_handle,notify_handle,om);
+    int rc = ble_gattc_notify_custom(conn_handle,notify_handle,om); //enviamos notificacion
     if (rc == 0){
         ESP_LOGW(BLE_TAG,"notificacion enviada: %s",buffer);
     } else {
@@ -150,7 +149,7 @@ void notify_nodo(int index_nodo)
     }
 }
 
-static int gatt_credenciales(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
+static int gatt_credenciales(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) //no se termino de configurar
 {
     char received_data[200];
     uint16_t len = ctxt->om->om_len;
